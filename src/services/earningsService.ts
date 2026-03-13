@@ -1,9 +1,11 @@
 import { GoogleGenAI } from '@google/genai';
 
-const FINNHUB_KEY = process.env.FINNHUB_API_KEY || '';
+const FINNHUB_KEY     = process.env.FINNHUB_API_KEY     || '';
 const COMMONSTACK_KEY = process.env.COMMONSTACK_API_KEY || '';
 const COMMONSTACK_URL = 'https://api.commonstack.ai/v1/chat/completions';
-const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_KEY      = process.env.GEMINI_API_KEY      || '';
+const MASSIVE_KEY     = process.env.MASSIVE_API_KEY     || '';
+const MASSIVE_BASE    = '/api/massive';
 
 // --- Types ---
 
@@ -58,21 +60,43 @@ export interface EarningsAnalysis {
 }
 
 // --- Rate limiting ---
-// Finnhub free tier: 60 calls/minute. We use a per-minute sliding window.
+// Finnhub free tier: 60 req/min. We pace to 55/min using a waiting queue
+// so calls never silently fail — they wait for a slot instead.
 
-const USAGE_KEY = 'polyearn_finnhub_usage';
-const MINUTE_LIMIT = 50; // stay under 60/min
+const RATE_LIMIT = 55;
+const callTimestamps: number[] = [];
 
-const recentCalls: number[] = [];
+async function acquireFinnhubToken(): Promise<void> {
+  while (true) {
+    const now = Date.now();
+    // Expire timestamps older than 60 s
+    while (callTimestamps.length > 0 && callTimestamps[0] < now - 60000) {
+      callTimestamps.shift();
+    }
+    if (callTimestamps.length < RATE_LIMIT) {
+      callTimestamps.push(now);
+      return;
+    }
+    // Wait until the oldest token expires, then retry
+    const waitMs = callTimestamps[0] + 60000 - now + 50;
+    await new Promise(r => setTimeout(r, Math.min(waitMs, 500)));
+  }
+}
 
+// Convenience: rate-limited fetch wrapper for all Finnhub URLs
+async function finnhubFetch(url: string): Promise<Response> {
+  await acquireFinnhubToken();
+  return fetch(url);
+}
+
+// Legacy shim so existing non-Pro code paths still compile
 function incrementUsage(): boolean {
   const now = Date.now();
-  // Prune calls older than 60s
-  while (recentCalls.length > 0 && recentCalls[0] < now - 60000) {
-    recentCalls.shift();
+  while (callTimestamps.length > 0 && callTimestamps[0] < now - 60000) {
+    callTimestamps.shift();
   }
-  if (recentCalls.length >= MINUTE_LIMIT) return false;
-  recentCalls.push(now);
+  if (callTimestamps.length >= RATE_LIMIT) return false;
+  callTimestamps.push(now);
   return true;
 }
 
@@ -196,39 +220,93 @@ const POLYMARKET_WEB = '/api/poly-web';
 let earningsSlugMap: Map<string, string> | null = null;
 let earningsSlugMapTs = 0;
 
+// Extract ticker → slug from a single event slug string.
+// Handles patterns like:
+//   aapl-quarterly-earnings-q2-2026
+//   aapl-q2-2026-earnings
+//   aapl-2026-q2-earnings
+//   aapl-earnings-q2-2026
+function tickerFromSlug(slug: string): string | null {
+  // Strip everything from "-earnings" or "-quarterly" onwards
+  const cutPatterns = [
+    /-quarterly-earnings/,
+    /-earnings/,
+    /-q[1-4]-/,
+    /-\d{4}-/,
+  ];
+  let cut = slug;
+  for (const p of cutPatterns) {
+    const m = slug.search(p);
+    if (m > 0) {
+      cut = slug.slice(0, m);
+      break;
+    }
+  }
+  const ticker = cut.replace(/-/g, '').toUpperCase();
+  // Sanity check: 1–6 uppercase letters
+  return /^[A-Z]{1,6}$/.test(ticker) ? ticker : null;
+}
+
 async function getEarningsSlugMap(): Promise<Map<string, string>> {
   if (earningsSlugMap && Date.now() - earningsSlugMapTs < CACHE_TTL) {
     return earningsSlugMap;
   }
 
+  const map = new Map<string, string>();
+
+  // ── Approach 1: scrape Polymarket /predictions/earnings HTML ──────────────
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
     const res = await fetch(`${POLYMARKET_WEB}/predictions/earnings`, { signal: controller.signal });
     clearTimeout(timeout);
-    if (!res.ok) throw new Error('Failed to fetch earnings page');
-    const html = await res.text();
-
-    // Extract event slugs matching quarterly-earnings pattern
-    const slugRegex = /\/event\/([a-z0-9-]+-quarterly-earnings-[a-z0-9-]+)/g;
-    const map = new Map<string, string>();
-    let match;
-    while ((match = slugRegex.exec(html)) !== null) {
-      const slug = match[1];
-      const ticker = slug.split('-quarterly-earnings')[0].toUpperCase();
-      if (!map.has(ticker)) {
-        map.set(ticker, slug);
+    if (res.ok) {
+      const html = await res.text();
+      // Match any /event/ slug that contains "earnings" anywhere in it
+      const slugRegex = /\/event\/([a-z0-9-]*earnings[a-z0-9-]*)/g;
+      let match;
+      while ((match = slugRegex.exec(html)) !== null) {
+        const slug = match[1];
+        const ticker = tickerFromSlug(slug);
+        if (ticker && !map.has(ticker)) map.set(ticker, slug);
       }
+      console.log(`[PolyEarn] HTML scrape: ${map.size} earnings markets`);
     }
+  } catch (err) {
+    console.warn('[PolyEarn] HTML scrape failed:', err);
+  }
 
+  // ── Approach 2: Gamma API search (used if scrape returned nothing) ─────────
+  if (map.size === 0) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(
+        `${POLYMARKET_API}/events?search=quarterly+earnings&active=true&limit=500`,
+        { signal: controller.signal },
+      );
+      clearTimeout(timeout);
+      if (res.ok) {
+        const events: any[] = await res.json();
+        for (const event of events) {
+          const slug: string = event.slug ?? '';
+          if (!slug.toLowerCase().includes('earnings')) continue;
+          const ticker = tickerFromSlug(slug);
+          if (ticker && !map.has(ticker)) map.set(ticker, slug);
+        }
+        console.log(`[PolyEarn] Gamma API fallback: ${map.size} earnings markets`);
+      }
+    } catch (err) {
+      console.warn('[PolyEarn] Gamma API fallback failed:', err);
+    }
+  }
+
+  if (map.size > 0) {
     earningsSlugMap = map;
     earningsSlugMapTs = Date.now();
-    console.log(`[PolyEarn] Found ${map.size} Polymarket earnings markets`);
-    return map;
-  } catch (err) {
-    console.warn('[PolyEarn] Could not fetch Polymarket earnings page:', err);
-    return earningsSlugMap || new Map();
   }
+  console.log(`[PolyEarn] Total earnings slug map size: ${map.size}`);
+  return map.size > 0 ? map : (earningsSlugMap ?? new Map());
 }
 
 const polymarketCache = new Map<string, PolymarketEarningsData | null>();
@@ -652,4 +730,639 @@ export async function analyzeCustomTickers(symbols: string[]): Promise<EarningsA
   }
 
   return [...results, ...enriched];
+}
+
+// ─── Options IV & Skew (Massive API) ──────────────────────────────────────
+
+export interface OptionsIVData {
+  atmIV: number | null;      // ATM implied volatility as % (e.g. 45.2)
+  putSkew: number | null;    // OTM put IV − ATM call IV in % points (positive = fear)
+  nearExpiry: string | null; // expiry date used
+  callIV: number | null;
+  putIV: number | null;
+}
+
+const ivCache = new Map<string, { data: OptionsIVData | null; ts: number }>();
+
+export async function fetchOptionsIV(
+  symbol: string,
+  earningsDate: string,
+  currentPrice: number,
+): Promise<OptionsIVData | null> {
+  const key = `${symbol}-${earningsDate}`;
+  const cached = ivCache.get(key);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+  if (!MASSIVE_KEY || !currentPrice || !earningsDate) return null;
+
+  try {
+    const earningsTs  = new Date(earningsDate + 'T12:00:00').getTime();
+    const expiryFrom  = new Date(earningsTs - 4 * 86400000).toISOString().slice(0, 10);
+    const expiryTo    = new Date(earningsTs + 14 * 86400000).toISOString().slice(0, 10);
+    const strikeLow   = (currentPrice * 0.85).toFixed(2);
+    const strikeHigh  = (currentPrice * 1.15).toFixed(2);
+
+    const url = `${MASSIVE_BASE}/v3/snapshot/options/${encodeURIComponent(symbol)}` +
+      `?expiration_date.gte=${expiryFrom}&expiration_date.lte=${expiryTo}` +
+      `&strike_price.gte=${strikeLow}&strike_price.lte=${strikeHigh}` +
+      `&limit=250&apiKey=${MASSIVE_KEY}`;
+
+    const res = await fetch(url);
+    if (!res.ok) { ivCache.set(key, { data: null, ts: Date.now() }); return null; }
+    const data = await res.json();
+    const results: any[] = data.results || [];
+    if (results.length === 0) { ivCache.set(key, { data: null, ts: Date.now() }); return null; }
+
+    // Pick the expiry closest to earnings date
+    const expiries = [...new Set(
+      results.map((r: any) => r.details?.expiration_date).filter(Boolean)
+    )].sort();
+    const nearExpiry = expiries.reduce((best, d) =>
+      Math.abs(new Date(d + 'T12:00:00').getTime() - earningsTs) <
+      Math.abs(new Date(best + 'T12:00:00').getTime() - earningsTs) ? d : best
+    , expiries[0]);
+
+    const chain = results.filter(r => r.details?.expiration_date === nearExpiry);
+
+    // ATM strike = closest to current price
+    const strikes = [...new Set(chain.map((r: any) => Number(r.details?.strike_price)).filter(Boolean))]
+      .sort((a, b) => Math.abs(a - currentPrice) - Math.abs(b - currentPrice));
+    const atmStrike = strikes[0];
+
+    const atmCall = chain.find(r => r.details?.strike_price === atmStrike && r.details?.contract_type === 'call');
+    const atmPut  = chain.find(r => r.details?.strike_price === atmStrike && r.details?.contract_type === 'put');
+
+    // IV from Massive is a decimal (0.45 = 45%) — multiply by 100
+    const rawCallIV = atmCall?.implied_volatility ?? null;
+    const rawPutIV  = atmPut?.implied_volatility  ?? null;
+
+    // Guard: if value looks already-percentage (>2.0), don't double-multiply
+    const toPercent = (v: number | null) =>
+      v == null ? null : v > 2 ? v : v * 100;
+
+    const callIV = toPercent(rawCallIV);
+    const putIV  = toPercent(rawPutIV);
+    const atmIV  = callIV !== null && putIV !== null
+      ? (callIV + putIV) / 2
+      : callIV ?? putIV;
+
+    // OTM put skew: find put ~5% OTM (strike ≈ 95% of price)
+    const otmPutTarget = currentPrice * 0.95;
+    const otmPutStrike = strikes
+      .filter(s => s < currentPrice * 0.98)
+      .sort((a, b) => Math.abs(a - otmPutTarget) - Math.abs(b - otmPutTarget))[0];
+
+    const otmPutContract = otmPutStrike
+      ? chain.find(r => r.details?.strike_price === otmPutStrike && r.details?.contract_type === 'put')
+      : null;
+    const otmPutIV = toPercent(otmPutContract?.implied_volatility ?? null);
+
+    const putSkew = otmPutIV !== null && callIV !== null ? otmPutIV - callIV : null;
+
+    const result: OptionsIVData = { atmIV, putSkew, nearExpiry, callIV, putIV };
+    ivCache.set(key, { data: result, ts: Date.now() });
+    return result;
+  } catch {
+    ivCache.set(key, { data: null, ts: Date.now() });
+    return null;
+  }
+}
+
+// ─── Pro Analysis ──────────────────────────────────────────────────────────
+
+export interface SignalFactor {
+  label: string;
+  value: string;
+  score: number;  // -2 to +2
+  detail: string;
+}
+
+export interface ProAnalysis {
+  symbol: string;
+  name: string;
+  date: string;
+  hour: string;
+  epsEstimate: number | null;
+  logo?: string;
+  industry?: string;
+  marketCap?: number;
+  polymarket?: PolymarketEarningsData;
+  // Earnings history
+  history: HistoricalQuarter[];
+  beatCount: number;
+  missCount: number;
+  meetCount: number;
+  beatRate: number;
+  avgSurprisePct: number;
+  recentTrend: ('beat' | 'miss' | 'meet')[];
+  // Analyst consensus
+  analystBuy: number;
+  analystHold: number;
+  analystSell: number;
+  analystBuyPct: number | null;
+  analystCount: number;
+  // Price target
+  priceCurrent: number | null;
+  priceTargetMean: number | null;
+  priceTargetUpside: number | null;
+  // Estimate dispersion (analyst spread)
+  epsEstimateAvg: number | null;
+  epsEstimateHigh: number | null;
+  epsEstimateLow: number | null;
+  estimateDispersionPct: number | null;  // (high-low)/|avg| as %
+  // Insider activity (last 90 days)
+  insiderNetShares: number | null;       // + = net buying, - = net selling
+  insiderNetValue: number | null;
+  // Fundamentals
+  revenueGrowthTTM: number | null;      // % YoY
+  shortInterestPct: number | null;
+  peRatio: number | null;
+  // Options IV & Skew
+  optionsIV: OptionsIVData | null;
+  // Sector
+  sectorEtf: string;
+  sectorReturns: EtfReturns | null;
+  // Signal
+  signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  signalScore: number;
+  signalFactors: SignalFactor[];
+}
+
+const recCache      = new Map<string, { data: { buy: number; hold: number; sell: number } | null; ts: number }>();
+const ptCache       = new Map<string, { data: { mean: number; current: number } | null; ts: number }>();
+const epsEstCache   = new Map<string, { data: { avg: number; high: number; low: number; count: number } | null; ts: number }>();
+const insiderCache  = new Map<string, { data: { netShares: number; netValue: number } | null; ts: number }>();
+const basicsCache   = new Map<string, { data: { revenueGrowthTTM: number | null; shortInterestPct: number | null; peRatio: number | null } | null; ts: number }>();
+
+async function fetchRecommendationTrend(symbol: string): Promise<{ buy: number; hold: number; sell: number } | null> {
+  const cached = recCache.get(symbol);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+  if (!FINNHUB_KEY) return null;
+  try {
+    const res = await finnhubFetch(`https://finnhub.io/api/v1/stock/recommendation?symbol=${encodeURIComponent(symbol)}&token=${FINNHUB_KEY}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length === 0) { recCache.set(symbol, { data: null, ts: Date.now() }); return null; }
+    const latest = data[0];
+    const result = {
+      buy:  (latest.buy || 0) + (latest.strongBuy || 0),
+      hold: latest.hold || 0,
+      sell: (latest.sell || 0) + (latest.strongSell || 0),
+    };
+    recCache.set(symbol, { data: result, ts: Date.now() });
+    return result;
+  } catch { return null; }
+}
+
+async function fetchPriceTargetData(symbol: string): Promise<{ mean: number; current: number } | null> {
+  const cached = ptCache.get(symbol);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+  if (!FINNHUB_KEY) return null;
+  try {
+    // Quote is free; price-target requires paid plan — fetch independently
+    const [ptRes, qRes] = await Promise.all([
+      finnhubFetch(`https://finnhub.io/api/v1/stock/price-target?symbol=${encodeURIComponent(symbol)}&token=${FINNHUB_KEY}`),
+      finnhubFetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${FINNHUB_KEY}`),
+    ]);
+    const q = qRes.ok ? await qRes.json() : null;
+    const pt = ptRes.ok ? await ptRes.json() : null;
+    const current = q?.c || null;
+    const mean = pt?.targetMean || null;
+    if (!current) { ptCache.set(symbol, { data: null, ts: Date.now() }); return null; }
+    const result = { mean: mean ?? current, current };
+    ptCache.set(symbol, { data: result, ts: Date.now() });
+    return result;
+  } catch { return null; }
+}
+
+async function fetchEpsEstimateData(symbol: string): Promise<{ avg: number; high: number; low: number; count: number } | null> {
+  const cached = epsEstCache.get(symbol);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+  if (!FINNHUB_KEY) return null;
+  try {
+    const res = await finnhubFetch(`https://finnhub.io/api/v1/stock/eps-estimate?symbol=${encodeURIComponent(symbol)}&freq=quarterly&token=${FINNHUB_KEY}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const items: any[] = data.data || data || [];
+    // Take the first future/current quarter estimate
+    const item = items.find((e: any) => e.epsAvg != null);
+    if (!item) { epsEstCache.set(symbol, { data: null, ts: Date.now() }); return null; }
+    const result = { avg: item.epsAvg, high: item.epsHigh ?? item.epsAvg, low: item.epsLow ?? item.epsAvg, count: item.numberAnalysts ?? 0 };
+    epsEstCache.set(symbol, { data: result, ts: Date.now() });
+    return result;
+  } catch { return null; }
+}
+
+async function fetchInsiderActivityData(symbol: string): Promise<{ netShares: number; netValue: number } | null> {
+  const cached = insiderCache.get(symbol);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+  if (!FINNHUB_KEY) return null;
+  try {
+    const cutoff = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+    const res = await finnhubFetch(`https://finnhub.io/api/v1/stock/insider-transactions?symbol=${encodeURIComponent(symbol)}&from=${cutoff}&token=${FINNHUB_KEY}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const txns: any[] = data.data || [];
+    // P = Purchase, S = Sale
+    let netShares = 0, netValue = 0;
+    for (const t of txns) {
+      const shares = t.change ?? t.share ?? 0;
+      const price  = t.transactionPrice ?? 0;
+      if (t.transactionCode === 'P') { netShares += shares; netValue += shares * price; }
+      else if (t.transactionCode === 'S') { netShares -= shares; netValue -= shares * price; }
+    }
+    const result = { netShares, netValue };
+    insiderCache.set(symbol, { data: result, ts: Date.now() });
+    return result;
+  } catch { return null; }
+}
+
+const INDUSTRY_ETF: Record<string, string> = {
+  // Technology
+  'Technology':                'XLK',
+  'Software':                  'XLK',
+  'Semiconductors':            'SOXX',
+  'Electronic Technology':     'XLK',
+  'Hardware':                  'XLK',
+  // Financials
+  'Financial Services':        'XLF',
+  'Finance':                   'XLF',
+  'Banks':                     'KBE',
+  'Banking':                   'KBE',
+  'Insurance':                 'KIE',
+  // Healthcare
+  'Healthcare':                'XLV',
+  'Health Technology':         'XLV',
+  'Health Services':           'XLV',
+  'Pharmaceuticals':           'XPH',
+  'Biotechnology':             'XBI',
+  // Consumer
+  'Consumer Cyclical':         'XLY',
+  'Retail Trade':              'XRT',
+  'Consumer Defensive':        'XLP',
+  'Food & Beverage':           'XLP',
+  // Industrials
+  'Industrials':               'XLI',
+  'Producer Manufacturing':    'XLI',
+  'Transportation':            'XTN',
+  // Energy
+  'Energy':                    'XLE',
+  'Energy Minerals':           'XLE',
+  // Materials
+  'Materials':                 'XLB',
+  'Non-Energy Minerals':       'XLB',
+  // Real Estate
+  'Real Estate':               'XLRE',
+  // Utilities
+  'Utilities':                 'XLU',
+  // Communication / Media
+  'Communication Services':    'XLC',
+  'Media':                     'XLC',
+  'Telecommunications':        'XLC',
+};
+
+function industryToEtf(industry?: string): string {
+  if (!industry) return 'SPY';
+  // Try exact match first, then partial
+  if (INDUSTRY_ETF[industry]) return INDUSTRY_ETF[industry];
+  const key = Object.keys(INDUSTRY_ETF).find(k => industry.toLowerCase().includes(k.toLowerCase()));
+  return key ? INDUSTRY_ETF[key] : 'SPY';
+}
+
+export interface EtfReturns { d30: number; d60: number }
+const sectorCache = new Map<string, { data: EtfReturns | null; ts: number }>();
+
+async function fetchEtfReturns(etf: string): Promise<EtfReturns | null> {
+  const cached = sectorCache.get(etf);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+  if (!FINNHUB_KEY) return null;
+  try {
+    const to   = Math.floor(Date.now() / 1000);
+    const from = to - 65 * 86400;
+    const res  = await finnhubFetch(
+      `https://finnhub.io/api/v1/stock/candle?symbol=${etf}&resolution=D&from=${from}&to=${to}&token=${FINNHUB_KEY}`
+    );
+    if (!res.ok) { sectorCache.set(etf, { data: null, ts: Date.now() }); return null; }
+    const data = await res.json();
+    if (data.s !== 'ok') { sectorCache.set(etf, { data: null, ts: Date.now() }); return null; }
+    const closes: number[] = data.c || [];
+    if (closes.length < 5) { sectorCache.set(etf, { data: null, ts: Date.now() }); return null; }
+
+    const last = closes[closes.length - 1];
+    // approximate index for 30 and 60 calendar days back (assuming ~21 and ~42 trading days)
+    const idx30 = Math.max(0, closes.length - 22);
+    const idx60 = Math.max(0, closes.length - 43);
+    const result: EtfReturns = {
+      d30: ((last - closes[idx30]) / closes[idx30]) * 100,
+      d60: ((last - closes[idx60]) / closes[idx60]) * 100,
+    };
+    sectorCache.set(etf, { data: result, ts: Date.now() });
+    return result;
+  } catch { return null; }
+}
+
+async function fetchBasicFinancialsData(symbol: string): Promise<{ revenueGrowthTTM: number | null; shortInterestPct: number | null; peRatio: number | null } | null> {
+  const cached = basicsCache.get(symbol);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+  if (!FINNHUB_KEY) return null;
+  try {
+    const res = await finnhubFetch(`https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(symbol)}&metric=all&token=${FINNHUB_KEY}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const m = data.metric || {};
+    const result = {
+      revenueGrowthTTM:  m.revenueGrowthTTMYoy ?? null,
+      shortInterestPct:  m.shortInterest != null && m.sharesOutstanding ? (m.shortInterest / m.sharesOutstanding) * 100 : null,
+      peRatio:           m.peInclExtraTTM ?? m.peTTM ?? null,
+    };
+    basicsCache.set(symbol, { data: result, ts: Date.now() });
+    return result;
+  } catch { return null; }
+}
+
+function computeSignal(
+  beatRate: number,
+  historyLen: number,
+  recentTrend: ('beat' | 'miss' | 'meet')[],
+  avgSurprisePct: number,
+  analystBuyPct: number | null,
+  priceTargetUpside: number | null,
+  estimateDispersionPct: number | null,
+  insiderNetValue: number | null,
+  revenueGrowthTTM: number | null,
+  sectorReturns: EtfReturns | null,
+  optionsIV: OptionsIVData | null,
+): { signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL'; signalScore: number; signalFactors: SignalFactor[] } {
+  const factors: SignalFactor[] = [];
+
+  // 1. Historical beat rate
+  let beatScore = 0;
+  if (historyLen >= 4) {
+    if (beatRate >= 75) beatScore = 2;
+    else if (beatRate >= 55) beatScore = 1;
+    else if (beatRate >= 40) beatScore = 0;
+    else if (beatRate >= 25) beatScore = -1;
+    else beatScore = -2;
+  }
+  factors.push({ label: 'Beat Rate', value: historyLen > 0 ? `${beatRate.toFixed(0)}%` : 'N/A', score: beatScore, detail: `${historyLen} quarters of history` });
+
+  // 2. Recent trend (last 4 quarters)
+  let trendScore = 0;
+  const recentBeats = recentTrend.filter(r => r === 'beat').length;
+  if (recentTrend.length >= 3) {
+    if (recentBeats >= 4) trendScore = 2;
+    else if (recentBeats === 3) trendScore = 1;
+    else if (recentBeats === 2) trendScore = 0;
+    else if (recentBeats === 1) trendScore = -1;
+    else trendScore = -2;
+  }
+  factors.push({ label: 'Recent Trend', value: recentTrend.length > 0 ? `${recentBeats}/${recentTrend.length} beats` : 'N/A', score: trendScore, detail: 'Last 4 quarters' });
+
+  // 3. Average EPS surprise
+  let surpriseScore = 0;
+  if (historyLen >= 2) {
+    if (avgSurprisePct >= 5) surpriseScore = 2;
+    else if (avgSurprisePct >= 2) surpriseScore = 1;
+    else if (avgSurprisePct >= -2) surpriseScore = 0;
+    else if (avgSurprisePct >= -5) surpriseScore = -1;
+    else surpriseScore = -2;
+  }
+  factors.push({ label: 'Avg Surprise', value: historyLen > 0 ? `${avgSurprisePct >= 0 ? '+' : ''}${avgSurprisePct.toFixed(1)}%` : 'N/A', score: surpriseScore, detail: 'Avg EPS surprise vs estimate' });
+
+  // 4. Analyst buy %
+  let analystScore = 0;
+  if (analystBuyPct !== null) {
+    if (analystBuyPct >= 70) analystScore = 2;
+    else if (analystBuyPct >= 55) analystScore = 1;
+    else if (analystBuyPct >= 40) analystScore = 0;
+    else analystScore = -1;
+  }
+  factors.push({ label: 'Analyst Buys', value: analystBuyPct !== null ? `${analystBuyPct.toFixed(0)}%` : 'N/A', score: analystScore, detail: 'Buy + Strong Buy %' });
+
+  // 5. Price target upside
+  let ptScore = 0;
+  if (priceTargetUpside !== null) {
+    if (priceTargetUpside >= 20) ptScore = 2;
+    else if (priceTargetUpside >= 10) ptScore = 1;
+    else if (priceTargetUpside >= 0) ptScore = 0;
+    else ptScore = -1;
+  }
+  factors.push({ label: 'PT Upside', value: priceTargetUpside !== null ? `${priceTargetUpside >= 0 ? '+' : ''}${priceTargetUpside.toFixed(1)}%` : 'N/A', score: ptScore, detail: 'Analyst price target vs current price' });
+
+  // 6. Estimate dispersion — tight spread = confident analysts = less miss risk
+  let dispScore = 0;
+  if (estimateDispersionPct !== null) {
+    if (estimateDispersionPct < 10) dispScore = 1;
+    else if (estimateDispersionPct < 25) dispScore = 0;
+    else dispScore = -1;
+  }
+  factors.push({
+    label: 'Est. Dispersion',
+    value: estimateDispersionPct !== null ? `${estimateDispersionPct.toFixed(0)}%` : 'N/A',
+    score: dispScore,
+    detail: 'Analyst high/low spread — tight = confident consensus',
+  });
+
+  // 7. Insider activity — net $ bought/sold in last 90 days
+  let insiderScore = 0;
+  if (insiderNetValue !== null) {
+    if (insiderNetValue >= 1_000_000) insiderScore = 2;
+    else if (insiderNetValue >= 100_000) insiderScore = 1;
+    else if (insiderNetValue >= -100_000) insiderScore = 0;
+    else if (insiderNetValue >= -1_000_000) insiderScore = -1;
+    else insiderScore = -2;
+  }
+  const insiderLabel = insiderNetValue == null ? 'N/A'
+    : insiderNetValue >= 0 ? `+$${(insiderNetValue / 1000).toFixed(0)}K net buy`
+    : `-$${(Math.abs(insiderNetValue) / 1000).toFixed(0)}K net sell`;
+  factors.push({ label: 'Insider Activity', value: insiderLabel, score: insiderScore, detail: 'Insider net buy/sell (90 days)' });
+
+  // 8. Revenue growth TTM YoY
+  let revScore = 0;
+  if (revenueGrowthTTM !== null) {
+    if (revenueGrowthTTM >= 20) revScore = 2;
+    else if (revenueGrowthTTM >= 8) revScore = 1;
+    else if (revenueGrowthTTM >= 0) revScore = 0;
+    else if (revenueGrowthTTM >= -5) revScore = -1;
+    else revScore = -2;
+  }
+  factors.push({
+    label: 'Revenue Growth',
+    value: revenueGrowthTTM !== null ? `${revenueGrowthTTM >= 0 ? '+' : ''}${revenueGrowthTTM.toFixed(1)}%` : 'N/A',
+    score: revScore,
+    detail: 'TTM revenue growth YoY',
+  });
+
+  // 9. Sector ETF momentum — use 30d return for scoring
+  let sectorScore = 0;
+  const r30 = sectorReturns?.d30 ?? null;
+  if (r30 !== null) {
+    if (r30 >= 5) sectorScore = 1;
+    else if (r30 <= -5) sectorScore = -1;
+  }
+  const sectorVal = sectorReturns
+    ? `30d ${sectorReturns.d30 >= 0 ? '+' : ''}${sectorReturns.d30.toFixed(1)}% / 60d ${sectorReturns.d60 >= 0 ? '+' : ''}${sectorReturns.d60.toFixed(1)}%`
+    : 'N/A';
+  factors.push({
+    label: 'Sector Momentum',
+    value: sectorVal,
+    score: sectorScore,
+    detail: 'Sector ETF 30d & 60d return',
+  });
+
+  // 10. ATM Implied Volatility — low IV = less uncertainty = easier to beat
+  let ivScore = 0;
+  if (optionsIV?.atmIV != null) {
+    if (optionsIV.atmIV < 30)       ivScore =  1;
+    else if (optionsIV.atmIV < 50)  ivScore =  0;
+    else if (optionsIV.atmIV < 70)  ivScore = -1;
+    else                            ivScore = -2;
+  }
+  factors.push({
+    label: 'Options IV',
+    value: optionsIV?.atmIV != null ? `${optionsIV.atmIV.toFixed(1)}%` : 'N/A',
+    score: ivScore,
+    detail: 'ATM implied volatility pre-earnings',
+  });
+
+  // 11. Put skew — positive = market buying put protection = downside fear
+  let skewScore = 0;
+  if (optionsIV?.putSkew != null) {
+    if (optionsIV.putSkew < -1)      skewScore =  1;  // calls > puts = bullish positioning
+    else if (optionsIV.putSkew < 2)  skewScore =  0;
+    else if (optionsIV.putSkew < 6)  skewScore = -1;
+    else                             skewScore = -2;
+  }
+  factors.push({
+    label: 'Put Skew',
+    value: optionsIV?.putSkew != null
+      ? `${optionsIV.putSkew >= 0 ? '+' : ''}${optionsIV.putSkew.toFixed(1)}%`
+      : 'N/A',
+    score: skewScore,
+    detail: 'OTM put IV − ATM call IV (positive = downside fear)',
+  });
+
+  const signalScore = factors.reduce((s, f) => s + f.score, 0);
+  // Max: 9×(±2) + 1×(±1) = ±19; keep thresholds at ±6
+  const signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL' =
+    signalScore >= 6 ? 'BULLISH' : signalScore <= -6 ? 'BEARISH' : 'NEUTRAL';
+
+  return { signal, signalScore, signalFactors: factors };
+}
+
+const proCache = new Map<string, { data: ProAnalysis; ts: number }>();
+
+export async function fetchProAnalysisList(
+  symbols: string[],
+  calendarMap: Map<string, UpcomingEarning>,
+  onProgress?: (partial: ProAnalysis[]) => void,
+): Promise<ProAnalysis[]> {
+  const results: ProAnalysis[] = [];
+
+  // Pre-fetch all profiles in parallel to warm the cache and discover unique ETFs,
+  // then fetch all unique ETFs in parallel — all with the waiting rate limiter.
+  const profiles = await Promise.all(symbols.map(s => fetchCompanyProfile(s)));
+  const etfSet   = new Set(profiles.map(p => industryToEtf(p.industry)));
+  await Promise.all([...etfSet].map(etf => fetchEtfReturns(etf)));
+
+  for (let i = 0; i < symbols.length; i += 3) {
+    if (i > 0) await new Promise(r => setTimeout(r, 400));
+    const batch = symbols.slice(i, i + 3);
+
+    const batchResults = await Promise.all(batch.map(async symbol => {
+      const cached = proCache.get(symbol);
+      if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+
+      const cal = calendarMap.get(symbol);
+      const [profile, history, polymarket, rec, pt, epsEst, insider, basics] = await Promise.all([
+        fetchCompanyProfile(symbol),
+        fetchEarningsHistory(symbol),
+        fetchPolymarketEarnings(symbol),
+        fetchRecommendationTrend(symbol),
+        fetchPriceTargetData(symbol),
+        fetchEpsEstimateData(symbol),
+        fetchInsiderActivityData(symbol),
+        fetchBasicFinancialsData(symbol),
+      ]);
+
+      const sectorEtf    = industryToEtf(profile.industry);
+      const sectorReturns = await fetchEtfReturns(sectorEtf); // hits cache from pre-fetch
+
+      // Options IV — needs current price, fetched independently (no Finnhub quota)
+      const currentPrice = pt?.current ?? null;
+      const optionsIV = (cal?.date && currentPrice)
+        ? await fetchOptionsIV(symbol, cal.date, currentPrice)
+        : null;
+
+      const beatCount   = history.filter(q => q.surprise > 0.005).length;
+      const missCount   = history.filter(q => q.surprise < -0.005).length;
+      const meetCount   = history.length - beatCount - missCount;
+      const beatRate    = history.length > 0 ? (beatCount / history.length) * 100 : 0;
+      const avgSurprisePct = history.length > 0
+        ? history.reduce((s, q) => s + q.surprisePct, 0) / history.length : 0;
+
+      const recentTrend = history.slice(0, 4).map(q =>
+        q.surprise > 0.005 ? 'beat' : q.surprise < -0.005 ? 'miss' : 'meet'
+      ) as ('beat' | 'miss' | 'meet')[];
+
+      const totalAnalysts = rec ? rec.buy + rec.hold + rec.sell : 0;
+      const analystBuyPct = totalAnalysts > 0 ? (rec!.buy / totalAnalysts) * 100 : null;
+      const priceTargetUpside = pt ? ((pt.mean - pt.current) / pt.current) * 100 : null;
+
+      const estimateDispersionPct = epsEst && Math.abs(epsEst.avg) > 0.001
+        ? ((epsEst.high - epsEst.low) / Math.abs(epsEst.avg)) * 100 : null;
+
+      const { signal, signalScore, signalFactors } = computeSignal(
+        beatRate, history.length, recentTrend, avgSurprisePct,
+        analystBuyPct, priceTargetUpside,
+        estimateDispersionPct,
+        insider?.netValue ?? null,
+        basics?.revenueGrowthTTM ?? null,
+        sectorReturns,
+        optionsIV,
+      );
+
+      const analysis: ProAnalysis = {
+        symbol,
+        name: profile.name,
+        date: cal?.date || '',
+        hour: cal?.hour || '',
+        epsEstimate: cal?.epsEstimate ?? null,
+        logo: profile.logo,
+        industry: profile.industry,
+        marketCap: profile.marketCap,
+        polymarket: polymarket || undefined,
+        history,
+        beatCount, missCount, meetCount, beatRate, avgSurprisePct, recentTrend,
+        analystBuy: rec?.buy ?? 0,
+        analystHold: rec?.hold ?? 0,
+        analystSell: rec?.sell ?? 0,
+        analystBuyPct,
+        analystCount: totalAnalysts,
+        priceCurrent: pt?.current ?? null,
+        priceTargetMean: pt?.mean ?? null,
+        priceTargetUpside,
+        epsEstimateAvg: epsEst?.avg ?? null,
+        epsEstimateHigh: epsEst?.high ?? null,
+        epsEstimateLow: epsEst?.low ?? null,
+        estimateDispersionPct,
+        insiderNetShares: insider?.netShares ?? null,
+        insiderNetValue: insider?.netValue ?? null,
+        revenueGrowthTTM: basics?.revenueGrowthTTM ?? null,
+        shortInterestPct: basics?.shortInterestPct ?? null,
+        peRatio: basics?.peRatio ?? null,
+        optionsIV,
+        sectorEtf,
+        sectorReturns,
+        signal, signalScore, signalFactors,
+      };
+
+      proCache.set(symbol, { data: analysis, ts: Date.now() });
+      return analysis;
+    }));
+
+    results.push(...batchResults);
+    onProgress?.([...results]);
+  }
+
+  return results;
 }

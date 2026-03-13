@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, TrendingUp, TrendingDown, Minus, Loader2, Calendar, Clock, BarChart3, ExternalLink, Plus, Search, Trash2 } from 'lucide-react';
-import { analyzeUpcomingEarnings, analyzeCustomTickers, getPolymarketEarningsTickers, EarningsAnalysis } from '../services/earningsService';
+import { X, TrendingUp, TrendingDown, Minus, Loader2, Calendar, Clock, BarChart3, ExternalLink, Plus, Search, Trash2, Zap, ChevronUp, ChevronDown, Camera, CheckSquare } from 'lucide-react';
+import { analyzeCustomTickers, getPolymarketEarningsTickers, fetchUpcomingEarnings, fetchPolymarketEarnings, fetchProAnalysisList, EarningsAnalysis, ProAnalysis, OptionsIVData } from '../services/earningsService';
+import { exportCardsAsImage, ExportableCard } from '../utils/exportCards';
 
 interface PolyEarnPageProps {
   onClose: () => void;
 }
 
-type ViewMode = 'calendar' | 'custom';
+type ViewMode = 'calendar' | 'custom' | 'pro';
 
 const WATCHLIST_KEY = 'polyearn_watchlist';
 
@@ -24,16 +25,24 @@ function saveWatchlist(tickers: string[]) {
 
 type FilterTab = 'this_week' | 'next_week' | 'all';
 
+function toLocalDateStr(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 function getWeekRange(offset: number): { from: string; to: string } {
   const now = new Date();
   const day = now.getDay();
   const monday = new Date(now);
   monday.setDate(now.getDate() - (day === 0 ? 6 : day - 1) + offset * 7);
+  monday.setHours(0, 0, 0, 0);
   const friday = new Date(monday);
   friday.setDate(monday.getDate() + 4);
   return {
-    from: monday.toISOString().slice(0, 10),
-    to: friday.toISOString().slice(0, 10),
+    from: toLocalDateStr(monday),
+    to: toLocalDateStr(friday),
   };
 }
 
@@ -133,14 +142,33 @@ function BeatRateBar({ beatRate, total }: { beatRate: number; total: number }) {
   );
 }
 
-function EarningsCard({ analysis, onRemove }: { analysis: EarningsAnalysis; onRemove?: () => void }) {
+function EarningsCard({ analysis, onRemove, shareMode, selected, onToggleSelect }: {
+  analysis: EarningsAnalysis;
+  onRemove?: () => void;
+  shareMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
 
   return (
     <div
-      className="bg-black/40 border border-green-500/15 rounded-lg p-4 hover:border-green-500/40 transition-colors cursor-pointer"
-      onClick={() => setExpanded(!expanded)}
+      className={`relative bg-black/40 border rounded-lg p-4 transition-colors cursor-pointer ${
+        shareMode
+          ? selected
+            ? 'border-pink-500/60 ring-1 ring-pink-500/40'
+            : 'border-green-500/15 hover:border-pink-500/30'
+          : 'border-green-500/15 hover:border-green-500/40'
+      }`}
+      onClick={() => shareMode ? onToggleSelect?.() : setExpanded(!expanded)}
     >
+      {shareMode && (
+        <div className={`absolute top-2 right-2 w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
+          selected ? 'bg-pink-500 border-pink-500' : 'border-gray-600 bg-black/60'
+        }`}>
+          {selected && <span className="text-white text-[10px] font-bold">✓</span>}
+        </div>
+      )}
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-3 min-w-0 flex-1">
           {analysis.logo ? (
@@ -272,6 +300,362 @@ function EarningsCard({ analysis, onRemove }: { analysis: EarningsAnalysis; onRe
   );
 }
 
+// ─── Pro Tab Components ────────────────────────────────────────────────────
+
+function ScoreBar({ score }: { score: number }) {
+  // score: -2 to +2
+  const pct = ((score + 2) / 4) * 100;
+  const color = score >= 1 ? 'bg-green-500' : score <= -1 ? 'bg-red-500' : 'bg-yellow-500';
+  return (
+    <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+      <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+function TrendDots({ trend }: { trend: ('beat' | 'miss' | 'meet')[] }) {
+  return (
+    <div className="flex gap-1">
+      {trend.map((t, i) => (
+        <span
+          key={i}
+          title={t}
+          className={`w-2.5 h-2.5 rounded-full ${t === 'beat' ? 'bg-green-400' : t === 'miss' ? 'bg-red-400' : 'bg-gray-600'}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ProCard({ analysis, shareMode, selected, onToggleSelect }: {
+  analysis: ProAnalysis;
+  shareMode?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  const signalColors = {
+    BULLISH: { bg: 'bg-green-500/15', border: 'border-green-500/40', text: 'text-green-400', badge: 'bg-green-500/20 border-green-500/40' },
+    BEARISH: { bg: 'bg-red-500/15',   border: 'border-red-500/40',   text: 'text-red-400',   badge: 'bg-red-500/20 border-red-500/40' },
+    NEUTRAL: { bg: 'bg-gray-500/10',  border: 'border-gray-600/40',  text: 'text-gray-400',  badge: 'bg-gray-700/40 border-gray-600/40' },
+  }[analysis.signal];
+
+  const scoreDisplay = analysis.signalScore > 0 ? `+${analysis.signalScore}` : `${analysis.signalScore}`;
+
+  return (
+    <div
+      className={`relative border rounded-xl p-4 cursor-pointer transition-all bg-black/50 ${
+        shareMode
+          ? selected
+            ? 'border-pink-500/60 ring-1 ring-pink-500/40 hover:bg-black/70'
+            : `${signalColors.border} hover:border-pink-500/30 hover:bg-black/70`
+          : `${signalColors.border} hover:bg-black/70`
+      }`}
+      onClick={() => shareMode ? onToggleSelect?.() : setExpanded(!expanded)}
+    >
+      {shareMode && (
+        <div className={`absolute top-2 right-2 w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
+          selected ? 'bg-pink-500 border-pink-500' : 'border-gray-600 bg-black/60'
+        }`}>
+          {selected && <span className="text-white text-[10px] font-bold">✓</span>}
+        </div>
+      )}
+      {/* Header */}
+      <div className="flex items-start gap-3">
+        <div className="flex-shrink-0">
+          {analysis.logo ? (
+            <img src={analysis.logo} alt={analysis.symbol} className="w-10 h-10 rounded-lg bg-gray-800 border border-gray-700 object-contain"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+          ) : (
+            <div className="w-10 h-10 rounded-lg bg-gray-800 border border-gray-700 flex items-center justify-center">
+              <span className="text-sm font-bold text-gray-500">{analysis.symbol.charAt(0)}</span>
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-bold text-white font-mono">{analysis.symbol}</span>
+            <span className="text-gray-400 text-sm truncate">{analysis.name !== analysis.symbol ? analysis.name : ''}</span>
+          </div>
+          <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+            {analysis.date && (
+              <span className="text-[11px] font-mono text-gray-500">
+                {formatDate(analysis.date)}{analysis.hour ? ` · ${formatHour(analysis.hour)}` : ''}
+              </span>
+            )}
+            {analysis.epsEstimate != null && (
+              <span className="text-[11px] font-mono text-gray-600">EPS est. ${analysis.epsEstimate.toFixed(2)}</span>
+            )}
+          </div>
+        </div>
+        {/* Signal badge */}
+        <div className={`flex-shrink-0 px-3 py-1.5 rounded-lg border text-center ${signalColors.badge}`}>
+          <div className={`text-xs font-bold font-mono ${signalColors.text}`}>{analysis.signal}</div>
+          <div className={`text-lg font-black font-mono leading-tight ${signalColors.text}`}>{scoreDisplay}</div>
+          <div className="text-[9px] text-gray-600 font-mono">/10</div>
+        </div>
+      </div>
+
+      {/* Quick metrics row */}
+      <div className="flex items-center gap-3 mt-3 flex-wrap">
+        {analysis.polymarket && (
+          <a
+            href={`https://polymarket.com/event/${analysis.polymarket.slug}`}
+            target="_blank" rel="noopener noreferrer"
+            onClick={e => e.stopPropagation()}
+            className="flex items-center gap-1.5 px-2 py-1 rounded border border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20 transition-colors"
+          >
+            <span className="text-[10px] font-mono text-blue-400/70 uppercase">Poly</span>
+            <span className={`text-sm font-black font-mono ${analysis.polymarket.yesPct >= 50 ? 'text-green-400' : 'text-red-400'}`}>
+              {analysis.polymarket.yesPct.toFixed(0)}%
+            </span>
+            <span className="text-[10px] font-mono text-gray-600">
+              ${analysis.polymarket.volume >= 1000 ? `${(analysis.polymarket.volume / 1000).toFixed(0)}K` : Math.round(analysis.polymarket.volume)} vol
+            </span>
+            <ExternalLink className="w-2.5 h-2.5 text-blue-400/50" />
+          </a>
+        )}
+        <div className="flex items-center gap-1">
+          {analysis.recentTrend.length > 0 && <TrendDots trend={analysis.recentTrend} />}
+          {analysis.history.length > 0 && (
+            <span className="text-[10px] font-mono text-gray-600 ml-1">
+              {analysis.beatRate.toFixed(0)}% beat rate
+            </span>
+          )}
+        </div>
+        {analysis.revenueGrowthTTM !== null && (
+          <span className={`text-[10px] font-mono ${analysis.revenueGrowthTTM >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+            Rev {analysis.revenueGrowthTTM >= 0 ? '+' : ''}{analysis.revenueGrowthTTM.toFixed(1)}% YoY
+          </span>
+        )}
+        {analysis.shortInterestPct !== null && analysis.shortInterestPct > 5 && (
+          <span className="text-[10px] font-mono text-orange-500">
+            {analysis.shortInterestPct.toFixed(1)}% short
+          </span>
+        )}
+        {analysis.optionsIV?.atmIV != null && (
+          <span className={`text-[10px] font-mono ${
+            analysis.optionsIV.atmIV < 30 ? 'text-green-600'
+            : analysis.optionsIV.atmIV < 50 ? 'text-yellow-600'
+            : 'text-red-600'
+          }`}>
+            IV {analysis.optionsIV.atmIV.toFixed(0)}%
+            {analysis.optionsIV.putSkew != null && (
+              <span className="text-gray-600 ml-0.5">
+                skew {analysis.optionsIV.putSkew >= 0 ? '+' : ''}{analysis.optionsIV.putSkew.toFixed(1)}%
+              </span>
+            )}
+          </span>
+        )}
+        {analysis.sectorReturns && (
+          <span className={`text-[10px] font-mono ${analysis.sectorReturns.d30 >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+            {analysis.sectorEtf} {analysis.sectorReturns.d30 >= 0 ? '+' : ''}{analysis.sectorReturns.d30.toFixed(1)}%
+          </span>
+        )}
+        <div className="ml-auto text-gray-700">
+          {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+        </div>
+      </div>
+
+      {/* Expanded: signal factors */}
+      {expanded && (
+        <div className="mt-4 pt-4 border-t border-gray-800 space-y-3">
+          <p className="text-[10px] font-mono text-gray-600 uppercase tracking-wider">Signal Breakdown</p>
+          {analysis.signalFactors.map(f => (
+            <div key={f.label} className="flex items-center gap-3">
+              <span className="text-[11px] font-mono text-gray-500 w-28 flex-shrink-0">{f.label}</span>
+              <ScoreBar score={f.score} />
+              <span className={`text-[11px] font-mono w-14 text-right flex-shrink-0 ${f.score > 0 ? 'text-green-400' : f.score < 0 ? 'text-red-400' : 'text-gray-500'}`}>
+                {f.value}
+              </span>
+              <span className={`text-[11px] font-bold font-mono w-8 text-right flex-shrink-0 ${f.score > 0 ? 'text-green-400' : f.score < 0 ? 'text-red-400' : 'text-gray-600'}`}>
+                {f.score > 0 ? `+${f.score}` : f.score}
+              </span>
+            </div>
+          ))}
+
+          {/* Additional data grid */}
+          <div className="mt-3 pt-3 border-t border-gray-800/60 grid grid-cols-2 gap-x-6 gap-y-2">
+            {analysis.epsEstimateAvg !== null && (
+              <>
+                <div>
+                  <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">Consensus EPS Est.</p>
+                  <p className="text-[11px] font-mono text-gray-300">
+                    ${analysis.epsEstimateAvg.toFixed(2)}
+                    {analysis.epsEstimateHigh !== null && analysis.epsEstimateLow !== null && (
+                      <span className="text-gray-600 ml-1">(${analysis.epsEstimateLow.toFixed(2)}–${analysis.epsEstimateHigh.toFixed(2)})</span>
+                    )}
+                  </p>
+                </div>
+                {analysis.estimateDispersionPct !== null && (
+                  <div>
+                    <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">Analyst Spread</p>
+                    <p className={`text-[11px] font-mono ${analysis.estimateDispersionPct < 10 ? 'text-green-500' : analysis.estimateDispersionPct < 25 ? 'text-yellow-500' : 'text-red-500'}`}>
+                      {analysis.estimateDispersionPct.toFixed(0)}% {analysis.estimateDispersionPct < 10 ? '· tight' : analysis.estimateDispersionPct < 25 ? '· moderate' : '· wide'}
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+            {analysis.analystBuyPct !== null && (
+              <div>
+                <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">Analyst Consensus</p>
+                <p className="text-[11px] font-mono text-gray-300">
+                  {analysis.analystBuy}B / {analysis.analystHold}H / {analysis.analystSell}S
+                  <span className={`ml-1 ${analysis.analystBuyPct >= 60 ? 'text-green-400' : analysis.analystBuyPct < 40 ? 'text-red-400' : 'text-gray-500'}`}>
+                    ({analysis.analystBuyPct.toFixed(0)}% buy)
+                  </span>
+                </p>
+              </div>
+            )}
+            {analysis.priceTargetMean !== null && analysis.priceCurrent !== null && (
+              <div>
+                <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">Price Target</p>
+                <p className="text-[11px] font-mono text-gray-300">
+                  ${analysis.priceTargetMean.toFixed(2)} vs ${analysis.priceCurrent.toFixed(2)} now
+                  {analysis.priceTargetUpside !== null && (
+                    <span className={`ml-1 ${analysis.priceTargetUpside >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      ({analysis.priceTargetUpside >= 0 ? '+' : ''}{analysis.priceTargetUpside.toFixed(1)}%)
+                    </span>
+                  )}
+                </p>
+              </div>
+            )}
+            {analysis.insiderNetValue !== null && (
+              <div>
+                <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">Insider Activity (90d)</p>
+                <p className={`text-[11px] font-mono ${analysis.insiderNetValue >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {analysis.insiderNetValue >= 0 ? '+' : ''}${(analysis.insiderNetValue / 1000).toFixed(0)}K net {analysis.insiderNetValue >= 0 ? 'buy' : 'sell'}
+                  {analysis.insiderNetShares !== null && (
+                    <span className="text-gray-600 ml-1">({analysis.insiderNetShares >= 0 ? '+' : ''}{analysis.insiderNetShares.toLocaleString()} shares)</span>
+                  )}
+                </p>
+              </div>
+            )}
+            {analysis.shortInterestPct !== null && (
+              <div>
+                <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">Short Interest</p>
+                <p className={`text-[11px] font-mono ${analysis.shortInterestPct > 15 ? 'text-red-400' : analysis.shortInterestPct > 8 ? 'text-orange-400' : 'text-gray-400'}`}>
+                  {analysis.shortInterestPct.toFixed(1)}% of float
+                </p>
+              </div>
+            )}
+            {analysis.peRatio !== null && (
+              <div>
+                <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">P/E Ratio (TTM)</p>
+                <p className="text-[11px] font-mono text-gray-300">{analysis.peRatio.toFixed(1)}x</p>
+              </div>
+            )}
+            {analysis.optionsIV && (
+              <div className="col-span-2 grid grid-cols-2 gap-x-6 gap-y-2 pt-2 border-t border-gray-800/40">
+                {analysis.optionsIV.atmIV != null && (
+                  <div>
+                    <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">ATM Implied Volatility</p>
+                    <p className={`text-[11px] font-mono font-bold ${
+                      analysis.optionsIV.atmIV < 30 ? 'text-green-400'
+                      : analysis.optionsIV.atmIV < 50 ? 'text-yellow-400'
+                      : analysis.optionsIV.atmIV < 70 ? 'text-orange-400'
+                      : 'text-red-400'
+                    }`}>
+                      {analysis.optionsIV.atmIV.toFixed(1)}%
+                      <span className="text-gray-600 font-normal ml-1 text-[9px]">
+                        (C: {analysis.optionsIV.callIV?.toFixed(1) ?? '—'}% / P: {analysis.optionsIV.putIV?.toFixed(1) ?? '—'}%)
+                      </span>
+                    </p>
+                    <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+                      {analysis.optionsIV.atmIV < 30
+                        ? 'Low IV — market expects a calm earnings move; options are cheap relative to history.'
+                        : analysis.optionsIV.atmIV < 50
+                        ? 'Moderate IV — options are pricing in a meaningful move but uncertainty is contained.'
+                        : analysis.optionsIV.atmIV < 70
+                        ? 'Elevated IV — market is bracing for a large swing around earnings.'
+                        : 'Very high IV — extreme uncertainty priced in; risk of a sharp move in either direction.'}
+                    </p>
+                  </div>
+                )}
+                {analysis.optionsIV.putSkew != null && (
+                  <div>
+                    <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">Put Skew (OTM put − ATM call)</p>
+                    <p className={`text-[11px] font-mono font-bold ${
+                      analysis.optionsIV.putSkew < -1 ? 'text-green-400'
+                      : analysis.optionsIV.putSkew < 2 ? 'text-gray-300'
+                      : analysis.optionsIV.putSkew < 6 ? 'text-yellow-400'
+                      : analysis.optionsIV.putSkew < 12 ? 'text-orange-400'
+                      : 'text-red-400'
+                    }`}>
+                      {analysis.optionsIV.putSkew >= 0 ? '+' : ''}{analysis.optionsIV.putSkew.toFixed(1)}%
+                      <span className="text-gray-600 font-normal ml-1 text-[9px]">
+                        {analysis.optionsIV.putSkew < -1 ? 'call skew' : analysis.optionsIV.putSkew < 2 ? 'neutral' : analysis.optionsIV.putSkew < 6 ? 'mild put skew' : analysis.optionsIV.putSkew < 12 ? 'elevated put skew' : 'high put skew'}
+                      </span>
+                    </p>
+                    <p className="text-[10px] text-gray-500 mt-1 leading-snug">
+                      {analysis.optionsIV.putSkew < -1
+                        ? 'Calls are more expensive than puts — traders are positioning for upside or a short squeeze.'
+                        : analysis.optionsIV.putSkew < 2
+                        ? 'Skew is neutral — no strong directional bias from the options market heading into earnings.'
+                        : analysis.optionsIV.putSkew < 6
+                        ? 'Mild downside protection being bought — some hedging activity but not alarm-level fear.'
+                        : analysis.optionsIV.putSkew < 12
+                        ? 'Elevated put buying — market is paying a clear premium to hedge against a downside miss.'
+                        : 'Heavy put buying relative to calls — options market is pricing in meaningful downside risk.'}
+                    </p>
+                    {analysis.optionsIV.nearExpiry && (
+                      <p className="text-[9px] font-mono text-gray-600 mt-0.5">Expiry: {analysis.optionsIV.nearExpiry}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            {analysis.revenueGrowthTTM !== null && (
+              <div>
+                <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">Revenue Growth</p>
+                <p className={`text-[11px] font-mono ${analysis.revenueGrowthTTM >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {analysis.revenueGrowthTTM >= 0 ? '+' : ''}{analysis.revenueGrowthTTM.toFixed(1)}% TTM YoY
+                </p>
+              </div>
+            )}
+            <div>
+              <p className="text-[9px] font-mono text-gray-600 uppercase tracking-wider">Sector ETF ({analysis.sectorEtf})</p>
+              {analysis.sectorReturns ? (
+                <div className="flex gap-3 mt-0.5">
+                  <span className={`text-[11px] font-mono ${analysis.sectorReturns.d30 >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    30d: {analysis.sectorReturns.d30 >= 0 ? '+' : ''}{analysis.sectorReturns.d30.toFixed(2)}%
+                  </span>
+                  <span className={`text-[11px] font-mono ${analysis.sectorReturns.d60 >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    60d: {analysis.sectorReturns.d60 >= 0 ? '+' : ''}{analysis.sectorReturns.d60.toFixed(2)}%
+                  </span>
+                </div>
+              ) : (
+                <p className="text-[11px] font-mono text-gray-600">N/A</p>
+              )}
+              {analysis.industry && <p className="text-[10px] font-mono text-gray-600 mt-0.5">{analysis.industry}</p>}
+            </div>
+          </div>
+
+          {analysis.history.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-gray-800/60">
+              <p className="text-[10px] font-mono text-gray-600 uppercase tracking-wider mb-2">EPS History (Last {Math.min(analysis.history.length, 8)} Quarters)</p>
+              <div className="space-y-1 max-h-36 overflow-y-auto custom-scrollbar">
+                {analysis.history.slice(0, 8).map((q, i) => (
+                  <div key={i} className="flex items-center justify-between text-[11px] font-mono">
+                    <span className="text-gray-600 w-24">{q.period}</span>
+                    <span className="text-gray-400 w-16 text-right">A: {q.actual.toFixed(2)}</span>
+                    <span className="text-gray-500 w-16 text-right">E: {q.estimate.toFixed(2)}</span>
+                    <span className={`w-20 text-right ${q.surprise > 0.005 ? 'text-green-400' : q.surprise < -0.005 ? 'text-red-400' : 'text-gray-500'}`}>
+                      {q.surprise >= 0 ? '+' : ''}{q.surprisePct.toFixed(1)}%
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LoadingSkeleton() {
   return (
     <div className="space-y-3">
@@ -295,8 +679,58 @@ function LoadingSkeleton() {
 export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('custom');
   const [earnings, setEarnings] = useState<EarningsAnalysis[]>([]);
+  const [proData, setProData] = useState<ProAnalysis[]>([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<FilterTab>('this_week');
+  const [proSort, setProSort] = useState<'signal' | 'date' | 'poly'>('signal');
+  const [proSearch, setProSearch] = useState('');
+  const [proTickerLoading, setProTickerLoading] = useState(false);
+
+  const addProTicker = async (raw: string) => {
+    const symbol = raw.trim().toUpperCase();
+    if (!symbol || !/^[A-Z]{1,6}$/.test(symbol)) return;
+    if (proData.some(a => a.symbol === symbol)) return; // already loaded
+    setProTickerLoading(true);
+    try {
+      const calendar = await fetchUpcomingEarnings(); // uses cached data
+      const calendarMap = new Map(calendar.map(e => [e.symbol, e]));
+      const results = await fetchProAnalysisList([symbol], calendarMap);
+      if (results.length > 0) {
+        setProData(prev => prev.some(a => a.symbol === symbol) ? prev : [...prev, ...results]);
+      }
+    } catch { /* ignore */ } finally {
+      setProTickerLoading(false);
+    }
+  };
+
+  // Share / export state
+  const [shareMode, setShareMode] = useState(false);
+  const [selectedSymbols, setSelectedSymbols] = useState<Set<string>>(new Set());
+  const [exporting, setExporting] = useState(false);
+
+  const toggleSelect = (symbol: string) => {
+    setSelectedSymbols(prev => {
+      const next = new Set(prev);
+      if (next.has(symbol)) next.delete(symbol); else next.add(symbol);
+      return next;
+    });
+  };
+
+  const handleExport = async () => {
+    const cards: ExportableCard[] = [];
+    if (viewMode === 'pro') {
+      for (const a of proData) {
+        if (selectedSymbols.has(a.symbol)) cards.push({ type: 'pro', data: a });
+      }
+    } else {
+      for (const a of earnings) {
+        if (selectedSymbols.has(a.symbol)) cards.push({ type: 'earnings', data: a });
+      }
+    }
+    if (cards.length === 0) return;
+    setExporting(true);
+    try { await exportCardsAsImage(cards); } finally { setExporting(false); }
+  };
 
   // Custom ticker input
   const [watchlist, setWatchlist] = useState<string[]>(loadWatchlist);
@@ -309,9 +743,65 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
 
     if (viewMode === 'calendar') {
       setLoading(true);
-      analyzeUpcomingEarnings().then(data => {
-        if (mounted) { setEarnings(data); setLoading(false); }
-      }).catch(() => { if (mounted) setLoading(false); });
+      (async () => {
+        try {
+          const [raw, polyTickers] = await Promise.all([
+            fetchUpcomingEarnings(),
+            getPolymarketEarningsTickers(),
+          ]);
+          if (!mounted) return;
+
+          const polySet = new Set(polyTickers);
+          const candidates = raw
+            .filter(e => e.date && polySet.has(e.symbol))
+            .sort((a, b) => a.date.localeCompare(b.date));
+
+          // Fetch Polymarket odds for each match in parallel
+          const results = await Promise.all(candidates.map(async e => {
+            const polymarket = await fetchPolymarketEarnings(e.symbol);
+            return {
+              ...e,
+              polymarket: polymarket || undefined,
+              history: [],
+              beatCount: 0,
+              missCount: 0,
+              meetCount: 0,
+              beatRate: 0,
+              avgSurprisePct: 0,
+              prediction: null,
+              confidence: null,
+              reasoning: '',
+            } as EarningsAnalysis;
+          }));
+
+          if (mounted) { setEarnings(results); setLoading(false); }
+        } catch {
+          if (mounted) setLoading(false);
+        }
+      })();
+    } else if (viewMode === 'pro') {
+      setLoading(true);
+      setProData([]);
+      (async () => {
+        try {
+          const [raw, polyTickers] = await Promise.all([
+            fetchUpcomingEarnings(),
+            getPolymarketEarningsTickers(),
+          ]);
+          if (!mounted) return;
+
+          const polySet = new Set(polyTickers);
+          const calendarMap = new Map(raw.filter(e => polySet.has(e.symbol)).map(e => [e.symbol, e]));
+          const symbols = [...calendarMap.keys()];
+
+          await fetchProAnalysisList(symbols, calendarMap, partial => {
+            if (mounted) setProData([...partial]);
+          });
+          if (mounted) setLoading(false);
+        } catch {
+          if (mounted) setLoading(false);
+        }
+      })();
     } else if (viewMode === 'custom' && watchlist.length > 0) {
       setLoading(true);
       analyzeCustomTickers(watchlist).then(data => {
@@ -386,9 +876,23 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
             <p className="text-gray-500 text-sm font-mono">AI predictions + Polymarket odds</p>
             <p className="text-gray-600 text-[10px] font-mono mt-1">powered by <span className="text-gray-500">commonstack ai</span></p>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-green-400 transition-colors">
-            <X className="w-6 h-6" />
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => { setShareMode(s => !s); setSelectedSymbols(new Set()); }}
+              title="Select cards to export as image"
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono transition-colors border ${
+                shareMode
+                  ? 'bg-pink-500/20 border-pink-500/50 text-pink-400'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              <Camera className="w-3.5 h-3.5" />
+              {shareMode ? 'Selecting…' : 'Share'}
+            </button>
+            <button onClick={onClose} className="text-gray-400 hover:text-green-400 transition-colors">
+              <X className="w-6 h-6" />
+            </button>
+          </div>
         </div>
 
         {/* Mode toggle + controls */}
@@ -420,6 +924,19 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
                 <span className="flex items-center gap-1.5">
                   <Calendar className="w-3.5 h-3.5" />
                   Calendar
+                </span>
+              </button>
+              <button
+                onClick={() => setViewMode('pro')}
+                className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors border ${
+                  viewMode === 'pro'
+                    ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50'
+                    : 'bg-transparent text-gray-400 border-gray-700 hover:border-yellow-500/30 hover:text-gray-200'
+                }`}
+              >
+                <span className="flex items-center gap-1.5">
+                  <Zap className="w-3.5 h-3.5" />
+                  Pro
                 </span>
               </button>
             </div>
@@ -502,6 +1019,69 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
             </div>
           )}
 
+          {/* Pro sort + search controls */}
+          {viewMode === 'pro' && (
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-1.5">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-600 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={proSearch}
+                    onChange={e => setProSearch(e.target.value.toUpperCase())}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        const sym = proSearch.trim().toUpperCase();
+                        if (/^[A-Z]{1,6}$/.test(sym) && !proData.some(a => a.symbol === sym)) {
+                          addProTicker(sym);
+                        }
+                      }
+                    }}
+                    placeholder="Search or add ticker…"
+                    className="pl-8 pr-7 py-1.5 bg-black/60 border border-yellow-500/20 rounded-lg text-xs font-mono text-white placeholder-gray-600 focus:outline-none focus:border-yellow-500/50 w-52"
+                  />
+                  {proSearch && (
+                    <button
+                      onClick={() => setProSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-300"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+                {/* Show Add button when search looks like a ticker not yet in list */}
+                {/^[A-Z]{1,6}$/.test(proSearch) && !proData.some(a => a.symbol === proSearch) && (
+                  <button
+                    onClick={() => addProTicker(proSearch)}
+                    disabled={proTickerLoading}
+                    className="flex items-center gap-1 px-2.5 py-1.5 bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 rounded-lg text-xs font-mono hover:bg-yellow-500/20 transition-colors disabled:opacity-50"
+                  >
+                    {proTickerLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
+                    {proTickerLoading ? '' : 'Add'}
+                  </button>
+                )}
+              </div>
+              <span className="text-[11px] font-mono text-gray-600">Sort:</span>
+              {([
+                { key: 'signal', label: 'Signal Score' },
+                { key: 'date',   label: 'Date' },
+                { key: 'poly',   label: 'Poly Odds' },
+              ] as const).map(opt => (
+                <button
+                  key={opt.key}
+                  onClick={() => setProSort(opt.key)}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors border ${
+                    proSort === opt.key
+                      ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50'
+                      : 'bg-transparent text-gray-500 border-gray-700 hover:text-gray-300'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Calendar filter tabs */}
           {viewMode === 'calendar' && (
             <div className="flex gap-2">
@@ -528,11 +1108,83 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
 
         {/* Content */}
         <div className="p-6 overflow-y-auto custom-scrollbar flex-1">
-          {loading ? (
+          {viewMode === 'pro' ? (
+            // Pro mode
+            (() => {
+              const sorted = [...proData]
+              .filter(a => !proSearch || a.symbol.includes(proSearch) || a.name.toUpperCase().includes(proSearch))
+              .sort((a, b) => {
+                if (proSort === 'signal') return b.signalScore - a.signalScore;
+                if (proSort === 'date')   return a.date.localeCompare(b.date);
+                if (proSort === 'poly') {
+                  const ap = a.polymarket?.yesPct ?? -1;
+                  const bp = b.polymarket?.yesPct ?? -1;
+                  return bp - ap;
+                }
+                return 0;
+              });
+              return (
+                <>
+                  {loading && (
+                    <div className="flex items-center gap-2 text-yellow-400/70 font-mono text-sm mb-4">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      {proData.length === 0
+                        ? 'Fetching Polymarket tickers & sector data…'
+                        : `Loading indicators… (${proData.length} loaded, rate-paced to stay under Finnhub limit)`}
+                    </div>
+                  )}
+                  {!loading && proData.length === 0 && !proTickerLoading && (
+                    <div className="flex flex-col items-center justify-center py-16 gap-3">
+                      <Zap className="w-8 h-8 text-gray-700" />
+                      <p className="text-gray-500 font-mono text-sm">No Polymarket earnings found.</p>
+                      <p className="text-gray-600 text-xs font-mono">Type a ticker above and press Enter to add it manually.</p>
+                    </div>
+                  )}
+                  {proTickerLoading && (
+                    <div className="flex items-center gap-2 text-yellow-400/70 font-mono text-xs mb-3">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Fetching {proSearch} pro analysis…
+                    </div>
+                  )}
+                  {/* Search returned no results but has items overall */}
+                  {!loading && proData.length > 0 && sorted.length === 0 && proSearch && (
+                    <div className="flex flex-col items-center justify-center py-12 gap-3">
+                      {/^[A-Z]{1,6}$/.test(proSearch) ? (
+                        <>
+                          <p className="text-gray-500 font-mono text-sm">{proSearch} not in loaded list.</p>
+                          <button
+                            onClick={() => addProTicker(proSearch)}
+                            disabled={proTickerLoading}
+                            className="flex items-center gap-2 px-4 py-2 bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 rounded-lg text-sm font-mono hover:bg-yellow-500/20 transition-colors disabled:opacity-50"
+                          >
+                            {proTickerLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                            Add {proSearch} to Pro
+                          </button>
+                        </>
+                      ) : (
+                        <p className="text-gray-500 font-mono text-sm">No results for "{proSearch}".</p>
+                      )}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                    {sorted.map(a => (
+                      <ProCard
+                        key={a.symbol}
+                        analysis={a}
+                        shareMode={shareMode}
+                        selected={selectedSymbols.has(a.symbol)}
+                        onToggleSelect={() => toggleSelect(a.symbol)}
+                      />
+                    ))}
+                  </div>
+                </>
+              );
+            })()
+          ) : loading ? (
             <div className="flex flex-col items-center gap-4">
               <div className="flex items-center gap-2 text-green-400/70 font-mono text-sm">
                 <Loader2 className="w-4 h-4 animate-spin" />
-                {viewMode === 'custom' ? 'Analyzing tickers...' : 'Loading earnings data & AI predictions...'}
+                {viewMode === 'custom' ? 'Analyzing tickers...' : 'Loading earnings data...'}
               </div>
               <LoadingSkeleton />
             </div>
@@ -559,7 +1211,10 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
                 <EarningsCard
                   key={analysis.symbol}
                   analysis={analysis}
-                  onRemove={() => removeTicker(analysis.symbol)}
+                  onRemove={shareMode ? undefined : () => removeTicker(analysis.symbol)}
+                  shareMode={shareMode}
+                  selected={selectedSymbols.has(analysis.symbol)}
+                  onToggleSelect={() => toggleSelect(analysis.symbol)}
                 />
               ))}
             </div>
@@ -599,7 +1254,13 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
                         </div>
                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 ml-6">
                           {items.map(analysis => (
-                            <EarningsCard key={analysis.symbol} analysis={analysis} />
+                            <EarningsCard
+                              key={analysis.symbol}
+                              analysis={analysis}
+                              shareMode={shareMode}
+                              selected={selectedSymbols.has(analysis.symbol)}
+                              onToggleSelect={() => toggleSelect(analysis.symbol)}
+                            />
                           ))}
                         </div>
                       </div>
@@ -610,6 +1271,31 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
             </div>
           )}
         </div>
+
+        {/* Floating export bar */}
+        {shareMode && selectedSymbols.size > 0 && (
+          <div className="border-t border-pink-500/20 bg-[#0a0a0a] px-6 py-3 flex items-center justify-between">
+            <span className="text-sm font-mono text-pink-300">
+              {selectedSymbols.size} card{selectedSymbols.size !== 1 ? 's' : ''} selected
+            </span>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setSelectedSymbols(new Set())}
+                className="text-xs font-mono text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                Clear
+              </button>
+              <button
+                onClick={handleExport}
+                disabled={exporting}
+                className="flex items-center gap-2 px-4 py-2 bg-pink-500/20 border border-pink-500/50 text-pink-400 rounded-lg text-sm font-mono hover:bg-pink-500/30 transition-colors disabled:opacity-50"
+              >
+                {exporting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
+                {exporting ? 'Rendering…' : 'Export PNG'}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

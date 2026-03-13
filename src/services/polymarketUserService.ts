@@ -1,0 +1,181 @@
+export interface PolyTrade {
+  id: string;
+  timestamp: number;
+  type: string;       // 'BUY' | 'SELL' | 'REDEEM'
+  outcome: string;    // 'Yes' | 'No'
+  title: string;
+  slug: string;
+  price: number;
+  size: number;       // shares
+  usdcSize: number;   // dollar value
+  transactionHash: string;
+}
+
+export interface PolyPosition {
+  conditionId: string;
+  title: string;
+  slug: string;
+  outcome: string;
+  size: number;
+  avgPrice: number;
+  initialValue: number;
+  currentValue: number;
+  cashPnl: number;
+  percentPnl: number;
+  endDate: string;
+  closed: boolean;
+  winningOutcome?: string | null; // set after gamma API resolution check
+}
+
+export interface PolyProfile {
+  address: string;
+  displayName?: string;
+  bio?: string;
+  pfpUrl?: string;
+  profileImage?: string;
+}
+
+export async function fetchPolyProfile(address: string): Promise<PolyProfile | null> {
+  try {
+    const res = await fetch(`/api/poly-data/profiles?address=${address}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return Array.isArray(data) ? data[0] ?? null : data;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchPolyActivity(address: string, limit = 50): Promise<PolyTrade[]> {
+  const res = await fetch(`/api/poly-data/activity?user=${address}&limit=${limit}`);
+  if (!res.ok) throw new Error(`Activity fetch failed: ${res.status}`);
+  const data = await res.json();
+  return (Array.isArray(data) ? data : []).map((r: any) => ({
+    id: r.id ?? r.transactionHash ?? String(r.timestamp),
+    timestamp: r.timestamp,
+    type: r.side ?? r.type ?? 'TRADE',
+    outcome: r.outcome ?? '',
+    title: r.title ?? r.market ?? '',
+    slug: r.slug ?? '',
+    price: Number(r.price ?? 0),
+    size: Number(r.size ?? 0),
+    usdcSize: Number(r.usdcSize ?? r.amount ?? 0),
+    transactionHash: r.transactionHash ?? '',
+  }));
+}
+
+export interface MarketResolution {
+  conditionId: string;
+  resolved: boolean;
+  winningOutcome: string | null; // 'Yes' | 'No' | null if unresolved
+}
+
+/** Check if a market has resolved via the gamma API. */
+export async function checkMarketResolution(conditionId: string): Promise<MarketResolution> {
+  try {
+    const res = await fetch(`/api/polymarket/markets?conditionId=${conditionId}`);
+    if (!res.ok) return { conditionId, resolved: false, winningOutcome: null };
+    const data = await res.json();
+    const markets: any[] = Array.isArray(data) ? data : [data];
+    if (!markets.length) return { conditionId, resolved: false, winningOutcome: null };
+
+    // A market is resolved when active=false and closed=true
+    // outcomePrices is a JSON string like '["1","0"]', outcomes like '["Yes","No"]'
+    const m = markets[0];
+    const active = m.active ?? true;
+    const closed = m.closed ?? false;
+    if (active || !closed) return { conditionId, resolved: false, winningOutcome: null };
+
+    let outcomes: string[] = [];
+    let prices: number[] = [];
+    try { outcomes = JSON.parse(m.outcomes ?? '[]'); } catch {}
+    try { prices = JSON.parse(m.outcomePrices ?? '[]').map(Number); } catch {}
+
+    const winIdx = prices.findIndex(p => p >= 0.99);
+    const winningOutcome = winIdx >= 0 ? (outcomes[winIdx] ?? null) : null;
+    return { conditionId, resolved: true, winningOutcome };
+  } catch {
+    return { conditionId, resolved: false, winningOutcome: null };
+  }
+}
+
+/** Fetch conditionId for a market by slug via the gamma API. */
+export async function fetchConditionIdBySlug(slug: string): Promise<string | null> {
+  try {
+    const res = await fetch(`/api/polymarket/events?slug=${slug}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const events: any[] = Array.isArray(data) ? data : [data];
+    // events have markets array; grab first market's conditionId
+    const conditionId = events[0]?.markets?.[0]?.conditionId ?? null;
+    return conditionId;
+  } catch {
+    return null;
+  }
+}
+
+function mapPosition(r: any): PolyPosition {
+  return {
+    conditionId: r.conditionId ?? '',
+    title: r.title ?? r.market ?? '',
+    slug: r.slug ?? '',
+    outcome: r.outcome ?? '',
+    size: Number(r.size ?? 0),
+    avgPrice: Number(r.avgPrice ?? r.averagePrice ?? 0),
+    initialValue: Number(r.initialValue ?? 0),
+    currentValue: Number(r.currentValue ?? 0),
+    cashPnl: Number(r.cashPnl ?? 0),
+    percentPnl: Number(r.percentPnl ?? 0),
+    endDate: r.endDate ?? '',
+    closed: Boolean(r.closed),
+  };
+}
+
+/** Fetch positions for a wallet from the data API. */
+export async function fetchPolyPositions(address: string): Promise<PolyPosition[]> {
+  const params = new URLSearchParams({ user: address, limit: '500', offset: '0', sizeThreshold: '.001' });
+  const res = await fetch(`/api/poly-data/positions?${params}`);
+  if (!res.ok) throw new Error(`Positions fetch failed: ${res.status}`);
+  const data = await res.json();
+  return (Array.isArray(data) ? data : []).map(mapPosition);
+}
+
+/**
+ * Fetch ALL positions for a wallet, enriched with resolution status from the gamma API.
+ * The data API doesn't return a `closed` field — we detect resolution by checking
+ * the gamma API for positions whose endDate is in the past.
+ */
+export async function fetchAllPolyPositions(address: string): Promise<PolyPosition[]> {
+  const positions = await fetchPolyPositions(address);
+
+  const today = new Date().toISOString().split('T')[0];
+  const pastPositions = positions.filter(p => p.endDate && p.endDate < today);
+
+  if (pastPositions.length > 0) {
+    const resolutions = await Promise.allSettled(
+      pastPositions.map(p => checkMarketResolution(p.conditionId))
+    );
+
+    resolutions.forEach((r, i) => {
+      if (r.status === 'fulfilled' && r.value.resolved) {
+        const p = pastPositions[i];
+        p.closed = true;
+        p.winningOutcome = r.value.winningOutcome;
+        // Recompute P&L based on resolution: win = $1/share, loss = $0/share
+        const won = p.winningOutcome != null &&
+          p.outcome.toLowerCase() === p.winningOutcome.toLowerCase();
+        p.currentValue = won ? p.size : 0;
+        p.cashPnl = p.currentValue - p.initialValue;
+        p.percentPnl = p.initialValue > 0 ? (p.cashPnl / p.initialValue) * 100 : 0;
+      }
+    });
+  }
+
+  // Sort: open first, then closed sorted by P&L descending
+  positions.sort((a, b) => {
+    if (a.closed !== b.closed) return a.closed ? 1 : -1;
+    return b.cashPnl - a.cashPnl;
+  });
+
+  return positions;
+}
