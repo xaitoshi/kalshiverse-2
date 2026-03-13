@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Search, Globe2, Map, Zap, Activity, Layers, TrendingUp, ExternalLink } from 'lucide-react';
+import { Search, Globe2, Droplets, Activity, Layers, TrendingUp, ExternalLink } from 'lucide-react';
 import { MarketData } from '../data/mockData';
 
 interface SearchResult {
@@ -11,17 +11,16 @@ interface SearchResult {
 }
 
 interface TopBarProps {
-  viewMode: 'globe' | 'flat';
-  onViewModeChange: (mode: 'globe' | 'flat') => void;
   onOpenEcosystem: () => void;
   onOpenPolyEarn: () => void;
   onOpenOsint: () => void;
+  onOpenLiquidity: () => void;
   isOsintOpen: boolean;
   marketData: MarketData[];
   onSelectMarket: (market: MarketData) => void;
 }
 
-export default function TopBar({ viewMode, onViewModeChange, onOpenEcosystem, onOpenPolyEarn, onOpenOsint, isOsintOpen, marketData, onSelectMarket }: TopBarProps) {
+export default function TopBar({ onOpenEcosystem, onOpenPolyEarn, onOpenOsint, onOpenLiquidity, isOsintOpen, marketData, onSelectMarket }: TopBarProps) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isOpen, setIsOpen] = useState(false);
@@ -74,24 +73,12 @@ export default function TopBar({ viewMode, onViewModeChange, onOpenEcosystem, on
           KALSHIVERSE
         </div>
 
-        <div className="flex items-center bg-black/60 border border-green-500/30 backdrop-blur-md rounded-lg overflow-hidden p-1">
-          <button
-            onClick={() => onViewModeChange('globe')}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium flex items-center gap-2 transition-colors ${viewMode === 'globe' ? 'bg-green-500/20 text-green-400' : 'text-gray-400 hover:text-green-400'}`}
-          >
-            <Globe2 className="w-4 h-4" /> Globe
-          </button>
-          <button
-            onClick={() => onViewModeChange('flat')}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium flex items-center gap-2 transition-colors ${viewMode === 'flat' ? 'bg-green-500/20 text-green-400' : 'text-gray-400 hover:text-green-400'}`}
-          >
-            <Map className="w-4 h-4" /> Flat
-          </button>
-        </div>
-
         <div className="flex items-center bg-black/60 border border-green-500/30 backdrop-blur-md rounded-lg overflow-hidden p-1 gap-1">
-          <button className="px-4 py-1.5 border border-green-500/50 text-green-400 rounded-md text-sm font-medium flex items-center gap-2">
-            <Zap className="w-4 h-4" /> Breaking
+          <button
+            onClick={onOpenLiquidity}
+            className="px-4 py-1.5 border border-green-500/50 text-green-400 rounded-md text-sm font-medium flex items-center gap-2 hover:bg-green-500/10 transition-colors"
+          >
+            <Droplets className="w-4 h-4" /> Liquidity
           </button>
           <button
             onClick={onOpenOsint}

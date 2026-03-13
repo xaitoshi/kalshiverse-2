@@ -6,17 +6,17 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { ConnectionProvider, WalletProvider } from '@solana/wallet-adapter-react';
 import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom';
-import GlobeView from './components/GlobeView';
 import FlatMapView from './components/FlatMapView';
 import TopBar from './components/TopBar';
 import BottomOverlay from './components/BottomOverlay';
 import MarketPanel from './components/MarketPanel';
-import LiveNewsFeed from './components/LiveNewsFeed';
 import EcosystemModal from './components/EcosystemModal';
 import AdminModal from './components/AdminModal';
 import OsintPanel, { OsintAlert } from './components/OsintPanel';
 import TradeModal, { TradeMarket } from './components/TradeModal';
 import PolyEarnPage from './components/PolyEarnPage';
+import ResearchSection from './components/ResearchSection';
+import LiquidityDashboard from './components/LiquidityDashboard';
 import { MarketData } from './data/mockData';
 import { fetchPolymarkets } from './services/polymarketService';
 import { fetchKalshiMarkets } from './services/kalshiService';
@@ -26,7 +26,6 @@ const SOLANA_RPC = 'https://api.mainnet-beta.solana.com';
 export default function App() {
   const wallets = useMemo(() => [new PhantomWalletAdapter()], []);
   const [selectedMarket, setSelectedMarket] = useState<MarketData | null>(null);
-  const [viewMode, setViewMode] = useState<'globe' | 'flat'>('globe');
   const [isEcosystemOpen, setIsEcosystemOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [ecosystemKey, setEcosystemKey] = useState(0);
@@ -35,6 +34,7 @@ export default function App() {
   const [osintAlerts, setOsintAlerts] = useState<OsintAlert[]>([]);
   const [tradeMarket, setTradeMarket] = useState<TradeMarket | null>(null);
   const [isPolyEarnOpen, setIsPolyEarnOpen] = useState(false);
+  const [isLiquidityOpen, setIsLiquidityOpen] = useState(false);
 
   const handleOpenOsint = () => {
     setIsOsintOpen(true);
@@ -72,65 +72,78 @@ export default function App() {
   return (
     <ConnectionProvider endpoint={SOLANA_RPC}>
       <WalletProvider wallets={wallets} autoConnect>
-        <div className="relative w-full h-screen bg-[#050505] overflow-hidden font-sans text-white">
-          {viewMode === 'globe' ? (
-            <GlobeView data={marketData} onMarkerClick={handleSelectMarket} osintAlerts={osintAlerts} />
-          ) : (
+        <div className="bg-[#050505] font-sans text-white">
+
+          {/* Hero — full viewport map */}
+          <div className="relative w-full h-screen overflow-hidden">
             <FlatMapView data={marketData} onMarkerClick={handleSelectMarket} osintAlerts={osintAlerts} />
-          )}
 
-          <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_center,transparent_0%,#050505_100%)] opacity-60" />
+            <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_center,transparent_0%,#050505_100%)] opacity-60" />
 
-          <TopBar
-            viewMode={viewMode}
-            onViewModeChange={setViewMode}
-            onOpenEcosystem={() => setIsEcosystemOpen(true)}
-            onOpenPolyEarn={() => setIsPolyEarnOpen(true)}
-            onOpenOsint={handleOpenOsint}
-            isOsintOpen={isOsintOpen}
-            marketData={marketData}
-            onSelectMarket={handleSelectMarket}
-          />
-          <LiveNewsFeed />
-
-          {selectedMarket && (
-            <MarketPanel
-              market={selectedMarket}
-              onClose={() => setSelectedMarket(null)}
-              onTrade={handleTrade}
-            />
-          )}
-
-          {tradeMarket && (
-            <TradeModal market={tradeMarket} onClose={() => setTradeMarket(null)} />
-          )}
-
-          {isOsintOpen && (
-            <OsintPanel
+            <TopBar
+              onOpenEcosystem={() => setIsEcosystemOpen(true)}
+              onOpenPolyEarn={() => setIsPolyEarnOpen(true)}
+              onOpenOsint={handleOpenOsint}
+              onOpenLiquidity={() => setIsLiquidityOpen(true)}
+              isOsintOpen={isOsintOpen}
               marketData={marketData}
-              onClose={() => setIsOsintOpen(false)}
-              onAlerts={setOsintAlerts}
-              onRefreshMarkets={handleRefreshMarkets}
+              onSelectMarket={handleSelectMarket}
             />
-          )}
 
-          {isEcosystemOpen && (
-            <EcosystemModal
-              key={ecosystemKey}
-              onClose={() => setIsEcosystemOpen(false)}
-              onOpenAdmin={() => setIsAdminOpen(true)}
-            />
-          )}
+            {selectedMarket && (
+              <MarketPanel
+                market={selectedMarket}
+                onClose={() => setSelectedMarket(null)}
+                onTrade={handleTrade}
+              />
+            )}
 
-          {isPolyEarnOpen && (
-            <PolyEarnPage onClose={() => setIsPolyEarnOpen(false)} />
-          )}
+            {tradeMarket && (
+              <TradeModal market={tradeMarket} onClose={() => setTradeMarket(null)} />
+            )}
 
-          {isAdminOpen && (
-            <AdminModal onClose={() => { setIsAdminOpen(false); setEcosystemKey(k => k + 1); }} />
-          )}
+            {isOsintOpen && (
+              <OsintPanel
+                marketData={marketData}
+                onClose={() => setIsOsintOpen(false)}
+                onAlerts={setOsintAlerts}
+                onRefreshMarkets={handleRefreshMarkets}
+              />
+            )}
 
-          <BottomOverlay />
+            {isEcosystemOpen && (
+              <EcosystemModal
+                key={ecosystemKey}
+                onClose={() => setIsEcosystemOpen(false)}
+                onOpenAdmin={() => setIsAdminOpen(true)}
+              />
+            )}
+
+            {isPolyEarnOpen && (
+              <PolyEarnPage onClose={() => setIsPolyEarnOpen(false)} />
+            )}
+
+            {isLiquidityOpen && (
+              <LiquidityDashboard onClose={() => setIsLiquidityOpen(false)} />
+            )}
+
+            {isAdminOpen && (
+              <AdminModal onClose={() => { setIsAdminOpen(false); setEcosystemKey(k => k + 1); }} />
+            )}
+
+            <BottomOverlay />
+
+            {/* Scroll hint */}
+            <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1 pointer-events-none animate-bounce">
+              <span className="text-[10px] font-mono text-green-500/40 tracking-widest">SCROLL</span>
+              <svg width="12" height="8" viewBox="0 0 12 8" fill="none">
+                <path d="M1 1L6 6L11 1" stroke="#00ff0055" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+            </div>
+          </div>
+
+          {/* Research section */}
+          <ResearchSection />
         </div>
       </WalletProvider>
     </ConnectionProvider>
