@@ -27,13 +27,7 @@ export default function BottomOverlay() {
         </div>
       </div>
 
-      <div className="text-right max-w-md pointer-events-auto">
-        <p className="text-gray-400 font-mono text-sm leading-relaxed">
-          The live <span className="text-green-400">Polymarket map</span> & <span className="text-green-400">KalshiClaw market tracker</span><br/>
-          for geopolitical prediction markets. Your<br/>
-          global markets dashboard.
-        </p>
-      </div>
+
     </div>
   );
 }
