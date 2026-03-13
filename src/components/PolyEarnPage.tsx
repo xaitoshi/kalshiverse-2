@@ -864,10 +864,10 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
   const polyCount = displayed.filter(e => e.polymarket).length;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-      <div className="w-full max-w-5xl bg-[#0a0a0a] border border-green-500/30 rounded-xl shadow-[0_0_40px_rgba(0,255,0,0.1)] flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/80 backdrop-blur-sm sm:p-4">
+      <div className="w-full sm:max-w-5xl bg-[#0a0a0a] border border-green-500/30 sm:rounded-xl shadow-[0_0_40px_rgba(0,255,0,0.1)] flex flex-col h-[95dvh] sm:max-h-[90vh] rounded-t-2xl">
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-green-500/20">
+        <div className="flex items-center justify-between px-4 py-3 sm:p-6 border-b border-green-500/20">
           <div>
             <div className="flex items-center gap-2 mb-1">
               <BarChart3 className="w-5 h-5 text-green-400" />

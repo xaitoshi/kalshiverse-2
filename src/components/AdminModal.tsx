@@ -231,8 +231,8 @@ export default function AdminModal({ onClose }: AdminModalProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 backdrop-blur-md p-4">
-      <div className="w-full max-w-5xl bg-[#0a0a0a] border border-gray-700 rounded-xl shadow-2xl flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/90 backdrop-blur-md sm:p-4">
+      <div className="w-full sm:max-w-5xl bg-[#0a0a0a] border border-gray-700 sm:rounded-xl rounded-t-2xl shadow-2xl flex flex-col h-[95dvh] sm:max-h-[90vh]">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-800">
           <div>

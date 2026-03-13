@@ -941,9 +941,34 @@ export default function LiquidityDashboard({ onClose }: { onClose: () => void })
       </div>
 
       {/* Body */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        <div className="w-48 shrink-0 border-r border-green-500/20 flex flex-col py-4 overflow-y-auto">
+      <div className="flex flex-col md:flex-row flex-1 overflow-hidden">
+        {/* Mobile: horizontal scroll tab bar */}
+        <div className="md:hidden flex overflow-x-auto border-b border-green-500/20 bg-black/40 shrink-0 scrollbar-hide">
+          <button onClick={() => setSelected(null)}
+            className={`shrink-0 px-4 py-2.5 text-xs font-mono whitespace-nowrap border-b-2 transition-colors ${!selected ? 'border-green-400 text-green-400' : 'border-transparent text-gray-500'}`}>
+            All
+          </button>
+          {catData.map(c => (
+            <button key={c.label} onClick={() => setSelected(c.label)}
+              className={`shrink-0 px-4 py-2.5 text-xs font-mono whitespace-nowrap border-b-2 transition-colors flex items-center gap-1.5 ${selected === c.label ? 'border-green-400 text-white' : 'border-transparent text-gray-500'}`}>
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: c.color }} />
+              {c.label}
+            </button>
+          ))}
+          <button onClick={() => setSelected(LOW_LIQ_KEY)}
+            className={`shrink-0 px-4 py-2.5 text-xs font-mono whitespace-nowrap border-b-2 transition-colors ${isLowLiq ? 'border-amber-400 text-amber-300' : 'border-transparent text-gray-500'}`}>
+            🔥 Low Liq
+          </button>
+          {([['overview','Overview'],['markets','Top Markets'],['price-trends','Trends']] as const).map(([v,label]) => (
+            <button key={v} onClick={() => setView(v)}
+              className={`shrink-0 px-4 py-2.5 text-xs font-mono whitespace-nowrap border-b-2 transition-colors ${view === v ? 'border-green-400 text-green-400' : 'border-transparent text-gray-600'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Desktop: sidebar */}
+        <div className="hidden md:flex w-48 shrink-0 border-r border-green-500/20 flex-col py-4 overflow-y-auto">
           <div className="px-4 mb-3 text-[9px] text-green-500/40 tracking-widest font-bold">CATEGORIES</div>
 
           <button onClick={() => setSelected(null)}
@@ -997,7 +1022,7 @@ export default function LiquidityDashboard({ onClose }: { onClose: () => void })
         </div>
 
         {/* Main */}
-        <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+        <div className="flex-1 overflow-y-auto p-3 md:p-6 custom-scrollbar">
           {error && (
             <div className="text-red-400 text-xs font-mono mb-4 border border-red-500/20 rounded p-3">
               ERROR: {error} — <button onClick={loadData} className="underline">retry</button>
