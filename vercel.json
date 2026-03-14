@@ -15,6 +15,18 @@
     {
       "source": "/api/dflow-trade/:path*",
       "destination": "https://dev-quote-api.dflow.net/:path*"
+    },
+    {
+      "source": "/api/massive/:path*",
+      "destination": "https://api.massive.com/:path*"
+    },
+    {
+      "source": "/api/poly-data/:path*",
+      "destination": "https://data-api.polymarket.com/:path*"
+    },
+    {
+      "source": "/api/clob/:path*",
+      "destination": "https://clob.polymarket.com/:path*"
     }
   ]
 }
