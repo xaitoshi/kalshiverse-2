@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, TrendingUp, TrendingDown, Minus, Loader2, Calendar, Clock, BarChart3, ExternalLink, Plus, Search, Trash2, Zap, ChevronUp, ChevronDown, Camera, CheckSquare } from 'lucide-react';
 import { analyzeCustomTickers, getPolymarketEarningsTickers, fetchUpcomingEarnings, fetchPolymarketEarnings, fetchProAnalysisList, EarningsAnalysis, ProAnalysis, OptionsIVData } from '../services/earningsService';
-import { exportCardsAsImage, ExportableCard } from '../utils/exportCards';
+import { exportCardsAsImage } from '../utils/exportCards';
 
 interface PolyEarnPageProps {
   onClose: () => void;
@@ -142,17 +142,19 @@ function BeatRateBar({ beatRate, total }: { beatRate: number; total: number }) {
   );
 }
 
-function EarningsCard({ analysis, onRemove, shareMode, selected, onToggleSelect }: {
+function EarningsCard({ analysis, onRemove, shareMode, selected, onToggleSelect, onRef }: {
   analysis: EarningsAnalysis;
   onRemove?: () => void;
   shareMode?: boolean;
   selected?: boolean;
   onToggleSelect?: () => void;
+  onRef?: (el: HTMLDivElement | null) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
     <div
+      ref={onRef}
       className={`relative bg-black/40 border rounded-lg p-4 transition-colors cursor-pointer ${
         shareMode
           ? selected
@@ -327,11 +329,12 @@ function TrendDots({ trend }: { trend: ('beat' | 'miss' | 'meet')[] }) {
   );
 }
 
-function ProCard({ analysis, shareMode, selected, onToggleSelect }: {
+function ProCard({ analysis, shareMode, selected, onToggleSelect, onRef }: {
   analysis: ProAnalysis;
   shareMode?: boolean;
   selected?: boolean;
   onToggleSelect?: () => void;
+  onRef?: (el: HTMLDivElement | null) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -345,6 +348,7 @@ function ProCard({ analysis, shareMode, selected, onToggleSelect }: {
 
   return (
     <div
+      ref={onRef}
       className={`relative border rounded-xl p-4 cursor-pointer transition-all bg-black/50 ${
         shareMode
           ? selected
@@ -707,6 +711,7 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
   const [shareMode, setShareMode] = useState(false);
   const [selectedSymbols, setSelectedSymbols] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
+  const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
 
   const toggleSelect = (symbol: string) => {
     setSelectedSymbols(prev => {
@@ -717,19 +722,14 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
   };
 
   const handleExport = async () => {
-    const cards: ExportableCard[] = [];
-    if (viewMode === 'pro') {
-      for (const a of proData) {
-        if (selectedSymbols.has(a.symbol)) cards.push({ type: 'pro', data: a });
-      }
-    } else {
-      for (const a of earnings) {
-        if (selectedSymbols.has(a.symbol)) cards.push({ type: 'earnings', data: a });
-      }
+    const elements: HTMLElement[] = [];
+    for (const symbol of selectedSymbols) {
+      const el = cardRefs.current.get(symbol);
+      if (el) elements.push(el);
     }
-    if (cards.length === 0) return;
+    if (elements.length === 0) return;
     setExporting(true);
-    try { await exportCardsAsImage(cards); } finally { setExporting(false); }
+    try { await exportCardsAsImage(elements); } finally { setExporting(false); }
   };
 
   // Custom ticker input
@@ -1174,6 +1174,7 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
                         shareMode={shareMode}
                         selected={selectedSymbols.has(a.symbol)}
                         onToggleSelect={() => toggleSelect(a.symbol)}
+                        onRef={el => { if (el) cardRefs.current.set(a.symbol, el); else cardRefs.current.delete(a.symbol); }}
                       />
                     ))}
                   </div>
@@ -1215,6 +1216,7 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
                   shareMode={shareMode}
                   selected={selectedSymbols.has(analysis.symbol)}
                   onToggleSelect={() => toggleSelect(analysis.symbol)}
+                  onRef={el => { if (el) cardRefs.current.set(analysis.symbol, el); else cardRefs.current.delete(analysis.symbol); }}
                 />
               ))}
             </div>
@@ -1260,6 +1262,7 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
                               shareMode={shareMode}
                               selected={selectedSymbols.has(analysis.symbol)}
                               onToggleSelect={() => toggleSelect(analysis.symbol)}
+                              onRef={el => { if (el) cardRefs.current.set(analysis.symbol, el); else cardRefs.current.delete(analysis.symbol); }}
                             />
                           ))}
                         </div>
