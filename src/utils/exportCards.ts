@@ -15,22 +15,25 @@ export async function exportCardsAsImage(elements: HTMLElement[]) {
 
   const h2c = await loadHtml2Canvas();
 
-  // Capture each card at 2× for retina sharpness
+  // Capture each card at 1.5× — 2× causes memory failures on mobile
   const canvases: HTMLCanvasElement[] = await Promise.all(
-    elements.map(el => {
-      const rect = el.getBoundingClientRect();
-      return h2c(el, {
+    elements.map(el =>
+      h2c(el, {
         backgroundColor: '#0a0a0a',
         useCORS: true,
-        allowTaint: true,
-        scale: 2,
+        scale: 1.5,
         logging: false,
-        scrollX: -window.scrollX,
-        scrollY: -window.scrollY,
-        windowWidth: rect.width,
-        windowHeight: rect.height,
-      });
-    }),
+        scrollX: 0,
+        scrollY: 0,
+        imageTimeout: 5000,
+        onclone: (doc: Document) => {
+          // Replace any img that would fail CORS with a blank placeholder
+          doc.querySelectorAll('img').forEach((img: HTMLImageElement) => {
+            img.crossOrigin = 'anonymous';
+          });
+        },
+      }),
+    ),
   );
 
   const COLS      = Math.min(2, canvases.length);
@@ -94,12 +97,20 @@ export async function exportCardsAsImage(elements: HTMLElement[]) {
   ctx.textAlign = 'right';
   ctx.fillText('KALSHIVERSE.COM', totalW - OUTER_PAD, totalH - 12);
 
-  // Download
-  const link = document.createElement('a');
-  link.download = `polyearn-${new Date().toISOString().slice(0, 10)}.png`;
-  link.href = final.toDataURL('image/png');
-  link.style.display = 'none';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+  // Download via blob URL (more reliable than toDataURL for large images)
+  await new Promise<void>((resolve, reject) => {
+    final.toBlob(blob => {
+      if (!blob) { reject(new Error('toBlob returned null')); return; }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.download = `polyearn-${new Date().toISOString().slice(0, 10)}.png`;
+      link.href = url;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      resolve();
+    }, 'image/png');
+  });
 }

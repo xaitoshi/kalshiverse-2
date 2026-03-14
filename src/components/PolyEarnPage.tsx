@@ -729,7 +729,14 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
     }
     if (elements.length === 0) return;
     setExporting(true);
-    try { await exportCardsAsImage(elements); } finally { setExporting(false); }
+    try {
+      await exportCardsAsImage(elements);
+    } catch (err) {
+      console.error('Export failed:', err);
+      alert('Export failed: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setExporting(false);
+    }
   };
 
   // Custom ticker input
