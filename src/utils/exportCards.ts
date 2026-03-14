@@ -17,15 +17,20 @@ export async function exportCardsAsImage(elements: HTMLElement[]) {
 
   // Capture each card at 2× for retina sharpness
   const canvases: HTMLCanvasElement[] = await Promise.all(
-    elements.map(el =>
-      h2c(el, {
+    elements.map(el => {
+      const rect = el.getBoundingClientRect();
+      return h2c(el, {
         backgroundColor: '#0a0a0a',
         useCORS: true,
         allowTaint: true,
         scale: 2,
         logging: false,
-      }),
-    ),
+        scrollX: -window.scrollX,
+        scrollY: -window.scrollY,
+        windowWidth: rect.width,
+        windowHeight: rect.height,
+      });
+    }),
   );
 
   const COLS      = Math.min(2, canvases.length);
@@ -93,5 +98,8 @@ export async function exportCardsAsImage(elements: HTMLElement[]) {
   const link = document.createElement('a');
   link.download = `polyearn-${new Date().toISOString().slice(0, 10)}.png`;
   link.href = final.toDataURL('image/png');
+  link.style.display = 'none';
+  document.body.appendChild(link);
   link.click();
+  document.body.removeChild(link);
 }
