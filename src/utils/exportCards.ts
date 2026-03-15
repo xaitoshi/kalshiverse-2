@@ -1,11 +1,17 @@
 import { toCanvas } from 'html-to-image';
 
 async function captureElement(el: HTMLElement): Promise<HTMLCanvasElement> {
-  return toCanvas(el, {
+  const opts = {
     backgroundColor: '#0a0a0a',
     pixelRatio: 1.5,
-    skipFonts: false,
-  });
+    skipFonts: true,
+    // Skip external images that will fail CORS — logos show blank instead of crashing
+    filter: (node: Node) => {
+      if (node instanceof HTMLImageElement && node.src.startsWith('http')) return false;
+      return true;
+    },
+  };
+  return toCanvas(el, opts);
 }
 
 export async function exportCardsAsImage(elements: HTMLElement[]) {
