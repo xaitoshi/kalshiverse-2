@@ -1,73 +1,18 @@
-// Dynamically loads html2canvas from CDN on first use
-async function loadHtml2Canvas(): Promise<any> {
-  if ((window as any).html2canvas) return (window as any).html2canvas;
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
-    script.onload = () => resolve((window as any).html2canvas);
-    script.onerror = () => reject(new Error('Failed to load html2canvas'));
-    document.head.appendChild(script);
+import { toCanvas } from 'html-to-image';
+
+async function captureElement(el: HTMLElement): Promise<HTMLCanvasElement> {
+  return toCanvas(el, {
+    backgroundColor: '#0a0a0a',
+    pixelRatio: 1.5,
+    skipFonts: false,
   });
-}
-
-// html2canvas can't parse modern CSS color functions (oklab, oklch) used by Tailwind v4.
-// Solution: clone the element, walk every node and replace styles with browser-resolved
-// rgb() values from getComputedStyle, then capture the clone.
-const COLOR_PROPS = [
-  'color', 'background-color',
-  'border-color', 'border-top-color', 'border-right-color',
-  'border-bottom-color', 'border-left-color',
-  'outline-color', 'text-decoration-color',
-  'box-shadow', 'fill', 'stroke',
-];
-
-function applyResolvedStyles(original: Element, clone: Element) {
-  const cs = window.getComputedStyle(original);
-  const el = clone as HTMLElement;
-  for (const prop of COLOR_PROPS) {
-    const val = cs.getPropertyValue(prop);
-    if (val) el.style.setProperty(prop, val, 'important');
-  }
-  const origKids = original.children;
-  const cloneKids = clone.children;
-  for (let i = 0; i < origKids.length && i < cloneKids.length; i++) {
-    applyResolvedStyles(origKids[i], cloneKids[i]);
-  }
-}
-
-async function captureElement(h2c: any, el: HTMLElement): Promise<HTMLCanvasElement> {
-  const clone = el.cloneNode(true) as HTMLElement;
-  applyResolvedStyles(el, clone);
-
-  // Position offscreen so layout is preserved but invisible
-  clone.style.position = 'fixed';
-  clone.style.top = '-99999px';
-  clone.style.left = '0';
-  clone.style.width = el.offsetWidth + 'px';
-  clone.style.zIndex = '-1';
-  document.body.appendChild(clone);
-
-  try {
-    return await h2c(clone, {
-      backgroundColor: '#0a0a0a',
-      useCORS: true,
-      scale: 1.5,
-      logging: false,
-      scrollX: 0,
-      scrollY: 0,
-    });
-  } finally {
-    document.body.removeChild(clone);
-  }
 }
 
 export async function exportCardsAsImage(elements: HTMLElement[]) {
   if (elements.length === 0) return;
 
-  const h2c = await loadHtml2Canvas();
-
   const canvases: HTMLCanvasElement[] = await Promise.all(
-    elements.map(el => captureElement(h2c, el)),
+    elements.map(el => captureElement(el)),
   );
 
   const COLS      = Math.min(2, canvases.length);
@@ -130,7 +75,7 @@ export async function exportCardsAsImage(elements: HTMLElement[]) {
   ctx.textAlign = 'right';
   ctx.fillText('KALSHIVERSE.COM', totalW - OUTER_PAD, totalH - 12);
 
-  // Download via blob URL (more reliable than toDataURL for large canvases)
+  // Download
   await new Promise<void>((resolve, reject) => {
     final.toBlob(blob => {
       if (!blob) { reject(new Error('toBlob returned null')); return; }
