@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Plus, X, CheckCircle, TrendingUp, TrendingDown, Trash2, ChevronDown, ChevronUp, Lock, Unlock, Eye, EyeOff, RefreshCw, Wallet, Download } from 'lucide-react';
 import { checkMarketResolution, fetchAllPolyPositions, PolyPosition } from '../services/polymarketUserService';
 
@@ -23,11 +23,43 @@ const STORAGE_KEY = 'klvs_journal_trades';
 const SESSION_KEY = 'klvs_admin_auth';
 const ADMIN_PASSWORD = 'kalshi2026'; // change this
 
+const GIST_ID    = import.meta.env.VITE_GIST_ID as string | undefined;
+const GITHUB_TOKEN = import.meta.env.VITE_GITHUB_TOKEN as string | undefined;
+const GIST_FILE  = 'trades.json';
+
 function loadTrades(): JournalTrade[] {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]'); }
   catch { return []; }
 }
-function saveTrades(t: JournalTrade[]) { localStorage.setItem(STORAGE_KEY, JSON.stringify(t)); }
+function saveLocal(t: JournalTrade[]) { localStorage.setItem(STORAGE_KEY, JSON.stringify(t)); }
+
+async function fetchFromGist(): Promise<JournalTrade[] | null> {
+  if (!GIST_ID || !GITHUB_TOKEN) return null;
+  try {
+    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+      headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' },
+    });
+    if (!res.ok) return null;
+    const gist = await res.json();
+    const content = gist.files?.[GIST_FILE]?.content;
+    if (!content) return null;
+    return JSON.parse(content) as JournalTrade[];
+  } catch { return null; }
+}
+
+async function saveToGist(t: JournalTrade[]) {
+  if (!GIST_ID || !GITHUB_TOKEN) return;
+  await fetch(`https://api.github.com/gists/${GIST_ID}`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `token ${GITHUB_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(t, null, 2) } } }),
+  });
+}
+
 function loadAdminSession() { return sessionStorage.getItem(SESSION_KEY) === '1'; }
 
 function pnl(t: JournalTrade): number | null {
@@ -547,8 +579,29 @@ export default function TradeJournal() {
   const [filterStatus, setFilterStatus] = useState<'all' | 'open' | 'closed'>('all');
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
+  const isMounted = useRef(true);
+  useEffect(() => { isMounted.current = true; return () => { isMounted.current = false; }; }, []);
 
-  useEffect(() => { saveTrades(trades); }, [trades]);
+  // On mount: hydrate from Gist if configured (overrides stale localStorage)
+  useEffect(() => {
+    if (!GIST_ID || !GITHUB_TOKEN) return;
+    fetchFromGist().then(remote => {
+      if (remote && isMounted.current) {
+        setTrades(remote);
+        saveLocal(remote);
+      }
+    });
+  }, []);
+
+  // On every change: save locally + push to Gist
+  const saveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    saveLocal(trades);
+    if (!GIST_ID || !GITHUB_TOKEN) return;
+    // Debounce Gist writes to avoid hammering the API on rapid changes
+    if (saveRef.current) clearTimeout(saveRef.current);
+    saveRef.current = setTimeout(() => { saveToGist(trades); }, 1000);
+  }, [trades]);
 
   const allStrategies = [...new Set(trades.map(t => t.strategy))].filter(Boolean);
   const strategyOptions = [...new Set([...DEFAULT_STRATEGIES, ...allStrategies])];
