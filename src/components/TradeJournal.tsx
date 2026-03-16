@@ -23,41 +23,27 @@ const STORAGE_KEY = 'klvs_journal_trades';
 const SESSION_KEY = 'klvs_admin_auth';
 const ADMIN_PASSWORD = 'kalshi2026'; // change this
 
-const GIST_ID    = import.meta.env.VITE_GIST_ID as string | undefined;
-const GITHUB_TOKEN = import.meta.env.VITE_GIST_TOKEN as string | undefined;
-const GIST_FILE  = 'trades.json';
-
 function loadTrades(): JournalTrade[] {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]'); }
   catch { return []; }
 }
 function saveLocal(t: JournalTrade[]) { localStorage.setItem(STORAGE_KEY, JSON.stringify(t)); }
 
-async function fetchFromGist(): Promise<JournalTrade[] | null> {
-  if (!GIST_ID || !GITHUB_TOKEN) return null;
+async function fetchFromApi(): Promise<JournalTrade[] | null> {
   try {
-    const res = await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-      headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github+json' },
-    });
+    const res = await fetch('/api/trades');
     if (!res.ok) return null;
-    const gist = await res.json();
-    const content = gist.files?.[GIST_FILE]?.content;
-    if (!content) return null;
-    return JSON.parse(content) as JournalTrade[];
+    return await res.json();
   } catch { return null; }
 }
 
-async function saveToGist(t: JournalTrade[]) {
-  if (!GIST_ID || !GITHUB_TOKEN) return;
-  await fetch(`https://api.github.com/gists/${GIST_ID}`, {
-    method: 'PATCH',
-    headers: {
-      Authorization: `token ${GITHUB_TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify(t, null, 2) } } }),
+async function saveToApi(t: JournalTrade[]): Promise<void> {
+  const res = await fetch('/api/trades', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(t),
   });
+  if (!res.ok) throw new Error('Save failed');
 }
 
 function loadAdminSession() { return sessionStorage.getItem(SESSION_KEY) === '1'; }
@@ -584,11 +570,10 @@ export default function TradeJournal() {
 
   const [gistStatus, setGistStatus] = useState<'idle' | 'syncing' | 'ok' | 'error'>('idle');
 
-  // On mount: hydrate from Gist if configured (overrides stale localStorage)
+  // On mount: hydrate from API
   useEffect(() => {
-    if (!GIST_ID || !GITHUB_TOKEN) { setGistStatus('error'); return; }
     setGistStatus('syncing');
-    fetchFromGist().then(remote => {
+    fetchFromApi().then(remote => {
       if (!isMounted.current) return;
       if (remote) {
         setTrades(remote);
@@ -600,17 +585,16 @@ export default function TradeJournal() {
     });
   }, []);
 
-  // On every change: save locally + push to Gist
+  // On every change: save locally + push to API
   const saveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstRender = useRef(true);
   useEffect(() => {
     if (isFirstRender.current) { isFirstRender.current = false; return; }
     saveLocal(trades);
-    if (!GIST_ID || !GITHUB_TOKEN) return;
     if (saveRef.current) clearTimeout(saveRef.current);
     setGistStatus('syncing');
     saveRef.current = setTimeout(() => {
-      saveToGist(trades)
+      saveToApi(trades)
         .then(() => { if (isMounted.current) setGistStatus('ok'); })
         .catch(() => { if (isMounted.current) setGistStatus('error'); });
     }, 1000);
