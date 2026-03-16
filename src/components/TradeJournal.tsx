@@ -24,7 +24,7 @@ const SESSION_KEY = 'klvs_admin_auth';
 const ADMIN_PASSWORD = 'kalshi2026'; // change this
 
 const GIST_ID    = import.meta.env.VITE_GIST_ID as string | undefined;
-const GITHUB_TOKEN = import.meta.env.VITE_GITHUB_TOKEN as string | undefined;
+const GITHUB_TOKEN = import.meta.env.VITE_GIST_TOKEN as string | undefined;
 const GIST_FILE  = 'trades.json';
 
 function loadTrades(): JournalTrade[] {
@@ -582,25 +582,38 @@ export default function TradeJournal() {
   const isMounted = useRef(true);
   useEffect(() => { isMounted.current = true; return () => { isMounted.current = false; }; }, []);
 
+  const [gistStatus, setGistStatus] = useState<'idle' | 'syncing' | 'ok' | 'error'>('idle');
+
   // On mount: hydrate from Gist if configured (overrides stale localStorage)
   useEffect(() => {
-    if (!GIST_ID || !GITHUB_TOKEN) return;
+    if (!GIST_ID || !GITHUB_TOKEN) { setGistStatus('error'); return; }
+    setGistStatus('syncing');
     fetchFromGist().then(remote => {
-      if (remote && isMounted.current) {
+      if (!isMounted.current) return;
+      if (remote) {
         setTrades(remote);
         saveLocal(remote);
+        setGistStatus('ok');
+      } else {
+        setGistStatus('error');
       }
     });
   }, []);
 
   // On every change: save locally + push to Gist
   const saveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isFirstRender = useRef(true);
   useEffect(() => {
+    if (isFirstRender.current) { isFirstRender.current = false; return; }
     saveLocal(trades);
     if (!GIST_ID || !GITHUB_TOKEN) return;
-    // Debounce Gist writes to avoid hammering the API on rapid changes
     if (saveRef.current) clearTimeout(saveRef.current);
-    saveRef.current = setTimeout(() => { saveToGist(trades); }, 1000);
+    setGistStatus('syncing');
+    saveRef.current = setTimeout(() => {
+      saveToGist(trades)
+        .then(() => { if (isMounted.current) setGistStatus('ok'); })
+        .catch(() => { if (isMounted.current) setGistStatus('error'); });
+    }, 1000);
   }, [trades]);
 
   const allStrategies = [...new Set(trades.map(t => t.strategy))].filter(Boolean);
@@ -665,7 +678,12 @@ export default function TradeJournal() {
       <div className="max-w-7xl mx-auto px-6 py-12">
         {/* Header */}
         <div className="flex items-center justify-between mb-2">
-          <h2 className="text-green-400 font-bold tracking-wider text-lg font-mono">// MY TRADE JOURNAL</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-green-400 font-bold tracking-wider text-lg font-mono">// MY TRADE JOURNAL</h2>
+            {gistStatus === 'syncing' && <span className="text-[10px] font-mono text-yellow-400 animate-pulse">● syncing</span>}
+            {gistStatus === 'ok'      && <span className="text-[10px] font-mono text-green-500">● gist synced</span>}
+            {gistStatus === 'error'   && <span className="text-[10px] font-mono text-red-400" title="Check VITE_GIST_ID and VITE_GITHUB_TOKEN in Vercel env vars">● gist offline</span>}
+          </div>
           <div className="flex items-center gap-2 flex-wrap justify-end">
             {isAdmin && openWithConditionId > 0 && (
               <button onClick={syncResolutions} disabled={syncing}
