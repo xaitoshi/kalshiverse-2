@@ -663,7 +663,7 @@ export default function TradeJournal() {
         {/* Header */}
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-green-400 font-bold tracking-wider text-lg font-mono">// MY TRADE JOURNAL</h2>
+            <h2 className="text-green-400 font-bold tracking-wider text-lg font-mono">// OPEN TRADE JOURNAL</h2>
             {gistStatus === 'syncing' && <span className="text-[10px] font-mono text-yellow-400 animate-pulse">● syncing</span>}
             {gistStatus === 'ok'      && <span className="text-[10px] font-mono text-green-500">● gist synced</span>}
             {gistStatus === 'error'   && <span className="text-[10px] font-mono text-red-400" title="Check VITE_GIST_ID and VITE_GITHUB_TOKEN in Vercel env vars">● gist offline</span>}
