@@ -10,6 +10,28 @@ interface PolyEarnPageProps {
 type ViewMode = 'calendar' | 'custom' | 'pro';
 
 const WATCHLIST_KEY = 'polyearn_watchlist';
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function getCached<T>(key: string): T | null {
+  try {
+    const stored = localStorage.getItem(key);
+    if (!stored) return null;
+    const { data, timestamp, date } = JSON.parse(stored);
+    if (date !== todayStr()) return null; // stale if day changed
+    if (Date.now() - timestamp > CACHE_TTL_MS) return null;
+    return data as T;
+  } catch { return null; }
+}
+
+function setCache<T>(key: string, data: T) {
+  try {
+    localStorage.setItem(key, JSON.stringify({ data, timestamp: Date.now(), date: todayStr() }));
+  } catch { /* ignore quota errors */ }
+}
 
 function loadWatchlist(): string[] {
   try {
@@ -749,6 +771,8 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
     let mounted = true;
 
     if (viewMode === 'calendar') {
+      const cached = getCached<EarningsAnalysis[]>('polyearn_calendar');
+      if (cached) { setEarnings(cached); setLoading(false); return; }
       setLoading(true);
       (async () => {
         try {
@@ -763,7 +787,6 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
             .filter(e => e.date && polySet.has(e.symbol))
             .sort((a, b) => a.date.localeCompare(b.date));
 
-          // Fetch Polymarket odds for each match in parallel
           const results = await Promise.all(candidates.map(async e => {
             const polymarket = await fetchPolymarketEarnings(e.symbol);
             return {
@@ -781,12 +804,18 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
             } as EarningsAnalysis;
           }));
 
-          if (mounted) { setEarnings(results); setLoading(false); }
+          if (mounted) {
+            setCache('polyearn_calendar', results);
+            setEarnings(results);
+            setLoading(false);
+          }
         } catch {
           if (mounted) setLoading(false);
         }
       })();
     } else if (viewMode === 'pro') {
+      const cached = getCached<ProAnalysis[]>('polyearn_pro');
+      if (cached) { setProData(cached); setLoading(false); return; }
       setLoading(true);
       setProData([]);
       (async () => {
@@ -801,18 +830,30 @@ export default function PolyEarnPage({ onClose }: PolyEarnPageProps) {
           const calendarMap = new Map(raw.filter(e => polySet.has(e.symbol)).map(e => [e.symbol, e]));
           const symbols = [...calendarMap.keys()];
 
+          let finalPro: ProAnalysis[] = [];
           await fetchProAnalysisList(symbols, calendarMap, partial => {
-            if (mounted) setProData([...partial]);
+            finalPro = [...partial];
+            if (mounted) setProData(finalPro);
           });
-          if (mounted) setLoading(false);
+          if (mounted) {
+            setCache('polyearn_pro', finalPro);
+            setLoading(false);
+          }
         } catch {
           if (mounted) setLoading(false);
         }
       })();
     } else if (viewMode === 'custom' && watchlist.length > 0) {
+      const cacheKey = `polyearn_custom_${[...watchlist].sort().join(',')}`;
+      const cached = getCached<EarningsAnalysis[]>(cacheKey);
+      if (cached) { setEarnings(cached); setLoading(false); return; }
       setLoading(true);
       analyzeCustomTickers(watchlist).then(data => {
-        if (mounted) { setEarnings(data); setLoading(false); }
+        if (mounted) {
+          setCache(cacheKey, data);
+          setEarnings(data);
+          setLoading(false);
+        }
       }).catch(() => { if (mounted) setLoading(false); });
     } else {
       setEarnings([]);
