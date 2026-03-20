@@ -70,20 +70,43 @@ export interface MarketResolution {
   winningOutcome: string | null; // 'Yes' | 'No' | null if unresolved
 }
 
-/** Check if a market has resolved via the CLOB API (exact conditionId lookup). */
-export async function checkMarketResolution(conditionId: string): Promise<MarketResolution> {
+function resolveFromClobMarket(conditionId: string, m: any): MarketResolution {
+  if (!m?.closed) return { conditionId, resolved: false, winningOutcome: null };
+  const tokens: { outcome: string; price: number }[] = m.tokens ?? [];
+  const winner = tokens.find(t => t.price >= 0.99);
+  return { conditionId, resolved: !!winner, winningOutcome: winner?.outcome ?? null };
+}
+
+/** Check if a market has resolved. Uses CLOB exact lookup first, then title search fallback. */
+export async function checkMarketResolution(conditionId: string, marketTitle?: string): Promise<MarketResolution> {
   try {
-    const res = await fetch(`/api/clob/markets/${conditionId}`);
-    if (!res.ok) return { conditionId, resolved: false, winningOutcome: null };
-    const m = await res.json();
+    // Try exact CLOB lookup first (requires full 66-char conditionId)
+    if (conditionId.length >= 60) {
+      const res = await fetch(`/api/clob/markets/${conditionId}`);
+      if (res.ok) {
+        const m = await res.json();
+        if (!m.error) return resolveFromClobMarket(conditionId, m);
+      }
+    }
 
-    if (!m.closed) return { conditionId, resolved: false, winningOutcome: null };
+    // Fallback: search CLOB by market title
+    if (marketTitle) {
+      const q = encodeURIComponent(marketTitle.slice(0, 60));
+      const res = await fetch(`/api/clob/markets?search=${q}&limit=5`);
+      if (res.ok) {
+        const data = await res.json();
+        const markets: any[] = data?.data ?? (Array.isArray(data) ? data : []);
+        // Find the closest match by question text
+        const match = markets.find(m =>
+          m.question?.toLowerCase().includes('beat') &&
+          m.question?.toLowerCase().includes('earnings') &&
+          m.closed
+        );
+        if (match) return resolveFromClobMarket(match.condition_id ?? conditionId, match);
+      }
+    }
 
-    // tokens: [{ outcome: 'Yes', price: 1 }, { outcome: 'No', price: 0 }]
-    const tokens: { outcome: string; price: number }[] = m.tokens ?? [];
-    const winner = tokens.find(t => t.price >= 0.99);
-    const winningOutcome = winner?.outcome ?? null;
-    return { conditionId, resolved: !!winningOutcome, winningOutcome };
+    return { conditionId, resolved: false, winningOutcome: null };
   } catch {
     return { conditionId, resolved: false, winningOutcome: null };
   }

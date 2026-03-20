@@ -625,15 +625,18 @@ export default function TradeJournal() {
 
   const deleteTrade = (id: string) => setTrades(prev => prev.filter(t => t.id !== id));
 
-  // Auto-resolution sync — checks all open trades that have a conditionId
+  // Auto-resolution sync — checks all open trades (with or without conditionId)
   const syncResolutions = async () => {
-    const openWithId = trades.filter(t => t.status === 'open' && t.conditionId);
-    if (!openWithId.length) { setSyncResult('No open trades with a Condition ID to sync.'); return; }
+    const openTrades = trades.filter(t => t.status === 'open');
+    if (!openTrades.length) { setSyncResult('No open trades to sync.'); return; }
     setSyncing(true); setSyncResult(null);
     let updated = 0;
-    const results = await Promise.all(openWithId.map(t => checkMarketResolution(t.conditionId!)));
+    const results = await Promise.all(
+      openTrades.map(t => checkMarketResolution(t.conditionId ?? '', t.market))
+    );
     setTrades(prev => prev.map(t => {
-      const r = results.find(r => r.conditionId === t.conditionId);
+      if (t.status !== 'open') return t;
+      const r = results[openTrades.findIndex(o => o.id === t.id)];
       if (!r?.resolved || !r.winningOutcome) return t;
       const won = r.winningOutcome.toLowerCase() === t.side.toLowerCase();
       updated++;
@@ -655,7 +658,7 @@ export default function TradeJournal() {
   const wins = closed.filter(t => t.status === 'won');
   const overallWinRate = closed.length > 0 ? Math.round((wins.length / closed.length) * 100) : null;
   const totalPnl = closed.reduce((s, t) => s + (pnl(t) ?? 0), 0);
-  const openWithConditionId = trades.filter(t => t.status === 'open' && t.conditionId).length;
+  const openWithConditionId = trades.filter(t => t.status === 'open').length;
 
   return (
     <div className="border-t border-green-500/20">
