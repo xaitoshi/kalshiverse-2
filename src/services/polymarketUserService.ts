@@ -70,30 +70,20 @@ export interface MarketResolution {
   winningOutcome: string | null; // 'Yes' | 'No' | null if unresolved
 }
 
-/** Check if a market has resolved via the gamma API. */
+/** Check if a market has resolved via the CLOB API (exact conditionId lookup). */
 export async function checkMarketResolution(conditionId: string): Promise<MarketResolution> {
   try {
-    const res = await fetch(`/api/polymarket/markets?conditionId=${conditionId}`);
+    const res = await fetch(`/api/clob/markets/${conditionId}`);
     if (!res.ok) return { conditionId, resolved: false, winningOutcome: null };
-    const data = await res.json();
-    const markets: any[] = Array.isArray(data) ? data : [data];
-    if (!markets.length) return { conditionId, resolved: false, winningOutcome: null };
+    const m = await res.json();
 
-    // A market is resolved when active=false and closed=true
-    // outcomePrices is a JSON string like '["1","0"]', outcomes like '["Yes","No"]'
-    const m = markets[0];
-    const active = m.active ?? true;
-    const closed = m.closed ?? false;
-    if (active || !closed) return { conditionId, resolved: false, winningOutcome: null };
+    if (!m.closed) return { conditionId, resolved: false, winningOutcome: null };
 
-    let outcomes: string[] = [];
-    let prices: number[] = [];
-    try { outcomes = JSON.parse(m.outcomes ?? '[]'); } catch {}
-    try { prices = JSON.parse(m.outcomePrices ?? '[]').map(Number); } catch {}
-
-    const winIdx = prices.findIndex(p => p >= 0.99);
-    const winningOutcome = winIdx >= 0 ? (outcomes[winIdx] ?? null) : null;
-    return { conditionId, resolved: true, winningOutcome };
+    // tokens: [{ outcome: 'Yes', price: 1 }, { outcome: 'No', price: 0 }]
+    const tokens: { outcome: string; price: number }[] = m.tokens ?? [];
+    const winner = tokens.find(t => t.price >= 0.99);
+    const winningOutcome = winner?.outcome ?? null;
+    return { conditionId, resolved: !!winningOutcome, winningOutcome };
   } catch {
     return { conditionId, resolved: false, winningOutcome: null };
   }
